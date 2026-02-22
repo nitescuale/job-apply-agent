@@ -22,6 +22,31 @@ def _parse_json_response(raw: str) -> dict:
         raise ValueError(f"Model returned invalid JSON: {e}") from e
 
 
+def _warn_if_invented_skills(adapted: dict, cv_base: dict) -> None:
+    """Loggue un warning si des compétences absentes de cv_base sont détectées.
+
+    Args:
+        adapted: CV adapté retourné par le modèle
+        cv_base: CV de référence (source de vérité)
+    """
+    base_skills: set[str] = set()
+    for cat in cv_base.get("skills", {}).values():
+        if isinstance(cat, list):
+            base_skills.update(str(s).lower() for s in cat)
+
+    invented: list[str] = []
+    for cat in adapted.get("skills", {}).values():
+        if isinstance(cat, list):
+            for skill in cat:
+                if str(skill).lower() not in base_skills:
+                    invented.append(str(skill))
+
+    if invented:
+        logger.warning(
+            "cv_adapter: potential invented skills detected: %s", invented
+        )
+
+
 SYSTEM_PROMPT = """Tu es un expert en rédaction de CV. Tu adaptes un CV existant à une offre d'emploi.
 
 RÈGLES STRICTES:
@@ -73,5 +98,7 @@ RAPPEL: ne jamais inventer de compétences ou modifier les faits."""
     logger.info("cv_adapter: response received")
 
     result = _parse_json_response(raw)
+    # Valider qu'aucune compétence inventée n'est présente
+    _warn_if_invented_skills(result, cv_base)
     logger.info("cv_adapter: match_score=%.2f", result.get("match_score", 0))
     return result

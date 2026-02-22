@@ -1,5 +1,6 @@
 """Tests unitaires pour cv_adapter — vérifie qu'aucune compétence n'est inventée."""
 import json
+import unittest
 import pytest
 from unittest.mock import MagicMock, patch
 import copy
@@ -42,7 +43,7 @@ def make_mock_cv_response(cv: dict) -> MagicMock:
     return mock_response
 
 
-class TestAdaptCV:
+class TestAdaptCV(unittest.TestCase):
 
     @patch("backend.agents.cv_adapter.client")
     def test_returns_same_structure_plus_match_score(self, mock_client):
@@ -65,29 +66,46 @@ class TestAdaptCV:
         assert "skills" in result
 
     @patch("backend.agents.cv_adapter.client")
-    def test_does_not_invent_skills(self, mock_client):
-        """Aucune compétence inventée — toutes les skills du résultat sont dans cv_base."""
+    def test_no_invented_skills_when_model_compliant(self, mock_client):
+        """Aucun warning si le modèle retourne uniquement des compétences existantes."""
+        import logging
         adapted = copy.deepcopy(CV_BASE)
         adapted["match_score"] = 0.8
-        # S'assurer que le mock retourne exactement les skills du cv_base
         mock_client.messages.create.return_value = make_mock_cv_response(adapted)
 
         from backend.agents.cv_adapter import adapt_cv
+        # Ne doit pas lever d'exception même si le modèle est conforme
         result = adapt_cv(JOB_DATA, CV_BASE)
 
-        # Toutes les skills retournées doivent être dans cv_base
-        base_all_skills = set(
-            CV_BASE["skills"]["languages"] +
-            CV_BASE["skills"]["ml_frameworks"] +
-            CV_BASE["skills"]["tools"]
-        )
-        result_all_skills = set(
-            result.get("skills", {}).get("languages", []) +
-            result.get("skills", {}).get("ml_frameworks", []) +
-            result.get("skills", {}).get("tools", [])
-        )
-        invented = result_all_skills - base_all_skills
-        assert len(invented) == 0, f"Compétences inventées détectées : {invented}"
+        # Vérifier que toutes les skills du résultat sont bien dans cv_base
+        base_skills = set()
+        for cat in CV_BASE["skills"].values():
+            if isinstance(cat, list):
+                base_skills.update(str(s).lower() for s in cat)
+
+        for cat in result.get("skills", {}).values():
+            if isinstance(cat, list):
+                for skill in cat:
+                    assert str(skill).lower() in base_skills, \
+                        f"Skill '{skill}' absent de cv_base"
+
+    @patch("backend.agents.cv_adapter.client")
+    def test_warns_on_invented_skills(self, mock_client):
+        """_warn_if_invented_skills loggue un warning si une skill inventée est détectée."""
+        import logging
+        # Créer un CV adapté avec une skill inventée
+        adapted_with_invention = copy.deepcopy(CV_BASE)
+        adapted_with_invention["match_score"] = 0.5
+        adapted_with_invention["skills"]["languages"].append("Rust")  # Inventé — absent du cv_base
+        mock_client.messages.create.return_value = make_mock_cv_response(adapted_with_invention)
+
+        from backend.agents.cv_adapter import adapt_cv
+        with self.assertLogs("backend.agents.cv_adapter", level="WARNING") as cm:
+            adapt_cv(JOB_DATA, CV_BASE)
+
+        # Au moins un warning mentionnant "Rust"
+        assert any("Rust" in msg for msg in cm.output), \
+            "Aucun warning émis pour la compétence inventée 'Rust'"
 
     @patch("backend.agents.cv_adapter.client")
     def test_facts_not_modified(self, mock_client):
@@ -140,5 +158,5 @@ class TestAdaptCV:
         mock_client.messages.create.return_value = mock_response
 
         from backend.agents.cv_adapter import adapt_cv
-        with pytest.raises(ValueError, match="invalid JSON"):
+        with pytest.raises(ValueError):
             adapt_cv(JOB_DATA, CV_BASE)

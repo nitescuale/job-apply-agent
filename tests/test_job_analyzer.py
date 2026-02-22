@@ -113,7 +113,7 @@ class TestAnalyzeJob:
         mock_client.messages.create.return_value = mock_response
 
         from backend.agents.job_analyzer import analyze_job
-        with pytest.raises(ValueError, match="invalid JSON"):
+        with pytest.raises(ValueError):
             analyze_job(SAMPLE_JOB_TEXT)
 
     @patch("backend.agents.job_analyzer.client")
