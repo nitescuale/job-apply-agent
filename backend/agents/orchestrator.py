@@ -79,7 +79,7 @@ async def run_pipeline(job_url: str, job_text: str) -> dict:
     async def _run() -> dict:
         # Étape 1 : Analyser l'offre (sync → run in executor)
         logger.info("orchestrator: step 1 — job_analyzer")
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         job_data = await loop.run_in_executor(None, analyze_job, job_text)
 
         # Étape 2 : Charger le CV de base
@@ -91,7 +91,9 @@ async def run_pipeline(job_url: str, job_text: str) -> dict:
 
         # Étape 4 : Validation par l'orchestrateur (Claude Opus)
         logger.info("orchestrator: step 3 — validation")
-        await loop.run_in_executor(None, _validate_pipeline_output, job_data, adapted_cv)
+        is_valid = await loop.run_in_executor(None, _validate_pipeline_output, job_data, adapted_cv)
+        if not is_valid:
+            logger.warning("orchestrator: validation flagged potential issue in pipeline output")
 
         return {
             "job_data": job_data,

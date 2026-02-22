@@ -54,8 +54,12 @@ async def health():
 async def get_cv():
     logger.info("GET /cv")
     cv_path = DATA_DIR / "cv_base.json"
-    with open(cv_path, encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(cv_path, encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logger.error("cv_base.json not found at %s", cv_path)
+        raise HTTPException(status_code=404, detail="CV not found")
 
 
 @app.post("/analyze-and-adapt")

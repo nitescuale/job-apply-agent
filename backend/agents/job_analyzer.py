@@ -1,12 +1,26 @@
 """Job Analyzer agent — extrait les données structurées d'une offre d'emploi."""
 import json
 import logging
+import re
 
 from anthropic import Anthropic
 
 logger = logging.getLogger(__name__)
 
 client = Anthropic()  # lit ANTHROPIC_API_KEY depuis l'env
+
+
+def _parse_json_response(raw: str) -> dict:
+    """Extrait et parse le JSON d'une réponse modèle (gère les blocs markdown)."""
+    # Supprimer les fences markdown ```json ... ``` ou ``` ... ```
+    cleaned = re.sub(r"^```(?:json)?\s*\n?", "", raw.strip(), flags=re.IGNORECASE)
+    cleaned = re.sub(r"\n?```\s*$", "", cleaned.strip())
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        logger.error("job_analyzer: JSON parse error: %s | raw=%s", e, raw[:200])
+        raise ValueError(f"Model returned invalid JSON: {e}") from e
+
 
 SYSTEM_PROMPT = """Tu es un expert en analyse d'offres d'emploi.
 Tu extrais les informations clés d'une offre et les retournes en JSON strictement valide.
@@ -52,13 +66,7 @@ Offre d'emploi:
     raw = response.content[0].text.strip()
     logger.info("job_analyzer: response received")
 
-    # Nettoyer le JSON si entouré de backticks
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-
-    result = json.loads(raw)
+    result = _parse_json_response(raw)
     logger.info(
         "job_analyzer: extracted title=%s company=%s",
         result.get("title"),
