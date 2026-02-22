@@ -5,11 +5,13 @@ from datetime import date
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 load_dotenv()
+
+from backend.agents.orchestrator import run_pipeline  # noqa: E402
 
 # Logging vers backend/logs/{date}.log
 LOG_DIR = Path(__file__).parent / "logs"
@@ -58,6 +60,21 @@ async def get_cv():
 
 @app.post("/analyze-and-adapt")
 async def analyze_and_adapt(request: AnalyzeRequest):
+    """Analyse une offre d'emploi et retourne le CV adapté.
+
+    Args:
+        request: Body JSON contenant job_url et job_text
+
+    Returns:
+        dict avec job_data, adapted_cv et match_score
+    """
     logger.info("POST /analyze-and-adapt — url=%s", request.job_url)
-    # TODO: brancher orchestrateur
-    return {"job_data": {}, "adapted_cv": {}, "match_score": 0.0}
+    try:
+        result = await run_pipeline(request.job_url, request.job_text)
+        return result
+    except ValueError as exc:
+        logger.error("analyze-and-adapt: validation error — %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.error("analyze-and-adapt: unexpected error — %s", exc)
+        raise HTTPException(status_code=500, detail="Pipeline error")
