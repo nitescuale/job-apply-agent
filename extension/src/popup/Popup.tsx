@@ -34,24 +34,16 @@ export default function Popup() {
 
       setStep('Analyse de l\'offre en cours...')
 
-      // Injecter le scraper et récupérer le texte
-      const [{ result: jobText }] = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: () => {
-          // Récupérer le texte visible de la page
-          const body = document.body.cloneNode(true) as HTMLElement
-          // Supprimer les scripts et styles
-          body.querySelectorAll('script, style, nav, footer, header').forEach(el => el.remove())
-          return body.innerText.replace(/\s+/g, ' ').trim().slice(0, 8000)
-        },
-      })
+      // Envoyer un message au content script pour extraire le texte
+      const response = await chrome.tabs.sendMessage(tab.id, { type: 'EXTRACT_JOB_TEXT' }) as { text: string }
+      const jobText = response?.text
 
       if (!jobText) throw new Error('Impossible d\'extraire le texte de la page')
 
       setStep('Adaptation du CV en cours...')
 
       // Appel backend
-      const response = await fetch(`${BACKEND_URL}/analyze-and-adapt`, {
+      const backendResponse = await fetch(`${BACKEND_URL}/analyze-and-adapt`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -60,12 +52,12 @@ export default function Popup() {
         }),
       })
 
-      if (!response.ok) {
-        const errText = await response.text()
-        throw new Error(`Backend error ${response.status}: ${errText}`)
+      if (!backendResponse.ok) {
+        const errText = await backendResponse.text()
+        throw new Error(`Backend error ${backendResponse.status}: ${errText}`)
       }
 
-      const data: AnalysisResult = await response.json()
+      const data: AnalysisResult = await backendResponse.json()
       setResult(data)
       setState('result')
     } catch (err) {
@@ -158,9 +150,18 @@ export default function Popup() {
   if (state === 'loading') {
     return (
       <div style={styles.container}>
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
         <div style={styles.title}>Job Apply Agent</div>
         <div style={{ textAlign: 'center', padding: '20px' }}>
-          <div style={{ fontSize: '32px' }}>...</div>
+          <div style={{
+            width: '40px',
+            height: '40px',
+            border: '4px solid #e5e7eb',
+            borderTop: '4px solid #4f46e5',
+            borderRadius: '50%',
+            animation: 'spin 0.8s linear infinite',
+            margin: '0 auto 12px',
+          }} />
           <div style={styles.stepText}>{step}</div>
         </div>
       </div>
@@ -196,7 +197,7 @@ export default function Popup() {
         </div>
       )}
       <button style={styles.button} onClick={handleCopy}>
-        Copier le CV adapté
+        Copier le CV
       </button>
       <button
         style={{ ...styles.button, marginTop: '8px', backgroundColor: '#6b7280' }}
