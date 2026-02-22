@@ -2,6 +2,21 @@ import React, { useState } from 'react'
 
 const BACKEND_URL = 'http://localhost:8000'
 
+// Helper pour sendMessage avec gestion lastError
+function sendMessageToTab(tabId: number, message: unknown): Promise<{ text: string }> {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(
+          'Impossible de contacter la page. Rechargez la page et réessayez.'
+        ))
+        return
+      }
+      resolve(response as { text: string })
+    })
+  })
+}
+
 type State = 'idle' | 'loading' | 'result' | 'error'
 
 interface AdaptedCV {
@@ -22,6 +37,7 @@ export default function Popup() {
   const [result, setResult] = useState<AnalysisResult | null>(null)
   const [error, setError] = useState<string>('')
   const [step, setStep] = useState<string>('')
+  const [copied, setCopied] = useState(false)
 
   async function handleAnalyze() {
     setState('loading')
@@ -35,7 +51,7 @@ export default function Popup() {
       setStep('Analyse de l\'offre en cours...')
 
       // Envoyer un message au content script pour extraire le texte
-      const response = await chrome.tabs.sendMessage(tab.id, { type: 'EXTRACT_JOB_TEXT' }) as { text: string }
+      const response = await sendMessageToTab(tab.id, { type: 'EXTRACT_JOB_TEXT' })
       const jobText = response?.text
 
       if (!jobText) throw new Error('Impossible d\'extraire le texte de la page')
@@ -66,9 +82,16 @@ export default function Popup() {
     }
   }
 
-  function handleCopy() {
+  async function handleCopy() {
     if (!result) return
-    navigator.clipboard.writeText(JSON.stringify(result.adapted_cv, null, 2))
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(result.adapted_cv, null, 2))
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      setError('Impossible de copier dans le presse-papier')
+      setState('error')
+    }
   }
 
   function handleReset() {
@@ -197,7 +220,7 @@ export default function Popup() {
         </div>
       )}
       <button style={styles.button} onClick={handleCopy}>
-        Copier le CV
+        {copied ? '✅ Copié !' : '📋 Copier le CV'}
       </button>
       <button
         style={{ ...styles.button, marginTop: '8px', backgroundColor: '#6b7280' }}

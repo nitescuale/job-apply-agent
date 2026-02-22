@@ -23,7 +23,7 @@ export function extractJobText(): string {
   })
 
   // Extraire le texte, normaliser les espaces
-  const text = body.innerText
+  const text = (body.textContent ?? '')
     .replace(/\s+/g, ' ')
     .trim()
 
