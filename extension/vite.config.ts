@@ -8,4 +8,12 @@ export default defineConfig({
     react(),
     crx({ manifest }),
   ],
+  server: {
+    host: 'localhost',
+    port: 5173,
+    strictPort: true,
+    cors: {
+      origin: [/chrome-extension:\/\//],
+    },
+  },
 })

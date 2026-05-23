@@ -1,39 +1,28 @@
 /**
- * Content script — extrait le texte visible d'une offre d'emploi.
- * Activé sur les sites supportés définis dans manifest.json.
+ * Content script — capture le HTML rendu de l'offre d'emploi.
+ * Activé sur les sites supportés (manifest.json).
+ *
+ * Le HTML rendu (post-JS) est envoyé tel quel au backend qui le parse
+ * via Scrapling (CSS selectors + JSON-LD JobPosting).
  */
+
+const MAX_HTML_SIZE = 1_500_000 // ~1.5 MB, suffisant pour la plupart des pages d'offres
 
 /**
- * Extrait le texte visible pertinent de la page courante.
- * Supprime la navigation, les pieds de page, les scripts et styles.
- * Limite à 8000 caractères pour l'API.
+ * Capture le HTML complet de la page après rendu JavaScript.
+ * Tronque à MAX_HTML_SIZE pour éviter d'envoyer des pages géantes au backend.
  */
-export function extractJobText(): string {
-  const body = document.body.cloneNode(true) as HTMLElement
-
-  // Supprimer les éléments non pertinents
-  const selectorsToRemove = [
-    'script', 'style', 'noscript',
-    'nav', 'footer', 'header',
-    '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
-    '.cookie-banner', '.ad', '.advertisement',
-  ]
-  selectorsToRemove.forEach(selector => {
-    body.querySelectorAll(selector).forEach(el => el.remove())
-  })
-
-  // Extraire le texte, normaliser les espaces
-  const text = (body.textContent ?? '')
-    .replace(/\s+/g, ' ')
-    .trim()
-
-  return text.slice(0, 8000)
+export function captureRenderedHtml(): string {
+  const html = document.documentElement.outerHTML
+  return html.length > MAX_HTML_SIZE ? html.slice(0, MAX_HTML_SIZE) : html
 }
 
-// Écouter les messages depuis le popup
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message.type === 'EXTRACT_JOB_TEXT') {
-    sendResponse({ text: extractJobText() })
+  if (message.type === 'CAPTURE_JOB_HTML') {
+    sendResponse({
+      html: captureRenderedHtml(),
+      url: window.location.href,
+    })
   }
-  return true // Garder le canal ouvert pour la réponse async
+  return true
 })

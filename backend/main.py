@@ -1,6 +1,5 @@
-import json
+import asyncio
 import logging
-import os
 from datetime import date
 from pathlib import Path
 
@@ -11,9 +10,9 @@ from pydantic import BaseModel
 
 load_dotenv()
 
-from backend.agents.orchestrator import run_pipeline  # noqa: E402
+from backend.agents.job_scraper import scrape_job  # noqa: E402
+from backend.agents import llm_extractor  # noqa: E402
 
-# Logging vers backend/logs/{date}.log
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 logging.basicConfig(
@@ -26,8 +25,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).parent / "data"
-
 app = FastAPI(title="Job Apply Agent API")
 
 app.add_middleware(
@@ -39,46 +36,70 @@ app.add_middleware(
 )
 
 
-class AnalyzeRequest(BaseModel):
+class ScrapeRequest(BaseModel):
     job_url: str
-    job_text: str
+    job_html: str
 
 
 @app.get("/health")
 async def health():
     logger.info("GET /health")
-    return {"status": "ok"}
+    return {"status": "ok", "llm_available": llm_extractor.is_available()}
 
 
-@app.get("/cv")
-async def get_cv():
-    logger.info("GET /cv")
-    cv_path = DATA_DIR / "cv_base.json"
-    try:
-        with open(cv_path, encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        logger.error("cv_base.json not found at %s", cv_path)
-        raise HTTPException(status_code=404, detail="CV not found")
+@app.post("/scrape-job")
+async def scrape_job_endpoint(request: ScrapeRequest):
+    """Extrait les infos d'une offre depuis le HTML, puis les affine via Gemini.
 
-
-@app.post("/analyze-and-adapt")
-async def analyze_and_adapt(request: AnalyzeRequest):
-    """Analyse une offre d'emploi et retourne le CV adapté.
+    Pipeline :
+        1. scrape_job — extraction structurelle (JSON-LD, meta, fallback texte)
+        2. llm_extractor — moulinette Gemini qui filtre le bruit et structure
+           l'essentiel (skills, missions, résumé). Étape ignorée si pas de clé API.
 
     Args:
-        request: Body JSON contenant job_url et job_text
+        request: Body JSON contenant job_url et job_html
 
     Returns:
-        dict avec job_data, adapted_cv et match_score
+        dict fusionnant le scraping brut et les champs nettoyés par le LLM,
+        plus un flag `llm_used`.
     """
-    logger.info("POST /analyze-and-adapt — url=%s", request.job_url)
+    logger.info("POST /scrape-job — url=%s html_size=%d", request.job_url, len(request.job_html))
+    loop = asyncio.get_running_loop()
+
+    # 1. Scraping structurel
     try:
-        result = await run_pipeline(request.job_url, request.job_text)
-        return result
+        scraped = await asyncio.wait_for(
+            loop.run_in_executor(None, scrape_job, request.job_html, request.job_url),
+            timeout=15.0,
+        )
     except ValueError as exc:
-        logger.error("analyze-and-adapt: validation error — %s", exc)
+        logger.error("scrape-job: validation error — %s", exc)
         raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-        logger.error("analyze-and-adapt: unexpected error — %s", exc)
-        raise HTTPException(status_code=500, detail="Pipeline error")
+    except asyncio.TimeoutError:
+        logger.error("scrape-job: scraping timeout")
+        raise HTTPException(status_code=504, detail="Scraping timeout")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("scrape-job: scraping error")
+        raise HTTPException(status_code=500, detail=f"Scraping error: {exc}")
+
+    result: dict = dict(scraped)
+    result["llm_used"] = False
+
+    # 2. Moulinette LLM (optionnelle — dégrade proprement si indisponible)
+    if llm_extractor.is_available():
+        try:
+            essentials = await asyncio.wait_for(
+                loop.run_in_executor(None, llm_extractor.extract_essentials, scraped),
+                timeout=30.0,
+            )
+            for key, value in essentials.items():
+                if value not in (None, "", []):
+                    result[key] = value
+            result["llm_used"] = True
+            logger.info("scrape-job: étape LLM OK")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("scrape-job: étape LLM échouée, renvoi du scraping brut — %s", exc)
+    else:
+        logger.info("scrape-job: GEMINI_API_KEY absente, étape LLM ignorée")
+
+    return result

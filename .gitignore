@@ -1,4 +1,17 @@
+# Secrets
 .env
+
+# Logs
 backend/logs/
+
+# Python
 __pycache__/
+.pytest_cache/
+*.egg-info/
+
+# Node / build
 node_modules/
+extension/dist/
+
+# Tooling local
+.claude/
