@@ -99,6 +99,7 @@ async def scrape_job_endpoint(request: ScrapeRequest):
             logger.info("scrape-job: étape LLM OK")
         except Exception as exc:  # noqa: BLE001
             logger.error("scrape-job: étape LLM échouée, renvoi du scraping brut — %s", exc)
+            result["llm_error"] = f"{type(exc).__name__}: {exc}"
     else:
         logger.info("scrape-job: GEMINI_API_KEY absente, étape LLM ignorée")
 

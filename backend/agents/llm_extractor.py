@@ -17,7 +17,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-2.5-flash"
 # Limite la taille du payload envoyé au LLM (free tier + coût tokens)
 MAX_PAYLOAD_CHARS = 24000
 
