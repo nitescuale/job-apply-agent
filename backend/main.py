@@ -12,6 +12,7 @@ load_dotenv()
 
 from backend.agents.job_scraper import scrape_job  # noqa: E402
 from backend.agents import llm_extractor  # noqa: E402
+from backend.agents import form_filler  # noqa: E402
 
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
@@ -41,10 +42,53 @@ class ScrapeRequest(BaseModel):
     job_html: str
 
 
+class FillFormRequest(BaseModel):
+    form_schema: dict
+    context: dict | None = None
+
+
 @app.get("/health")
 async def health():
     logger.info("GET /health")
-    return {"status": "ok", "llm_available": llm_extractor.is_available()}
+    return {
+        "status": "ok",
+        "llm_available": llm_extractor.is_available(),
+        "form_filler_available": form_filler.is_available(),
+    }
+
+
+@app.post("/fill-form")
+async def fill_form_endpoint(request: FillFormRequest):
+    """Mappe les champs d'un formulaire de candidature au profil utilisateur via Gemini.
+
+    Args:
+        request: form_schema (champs détectés par le content script) + context optionnel
+                 (title, company de l'offre courante pour personnaliser la lettre).
+
+    Returns:
+        {"values": {field_id: value}, "cv_base64": str|null}
+    """
+    field_count = len((request.form_schema or {}).get("fields", []))
+    logger.info("POST /fill-form — %d champs", field_count)
+    loop = asyncio.get_running_loop()
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, form_filler.fill_form, request.form_schema, request.context),
+            timeout=30.0,
+        )
+        return result
+    except FileNotFoundError as exc:
+        logger.error("fill-form: profil absent — %s", exc)
+        raise HTTPException(status_code=412, detail=str(exc))
+    except RuntimeError as exc:
+        logger.error("fill-form: erreur — %s", exc)
+        raise HTTPException(status_code=502, detail=str(exc))
+    except asyncio.TimeoutError:
+        logger.error("fill-form: timeout")
+        raise HTTPException(status_code=504, detail="Form filling timeout")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("fill-form: erreur inattendue")
+        raise HTTPException(status_code=500, detail=f"Fill error: {exc}")
 
 
 @app.post("/scrape-job")

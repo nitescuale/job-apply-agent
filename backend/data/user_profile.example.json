@@ -1,0 +1,27 @@
+{
+  "first_name": "Alex",
+  "last_name": "Nitescu",
+  "email": "alex@example.com",
+  "phone": "+33 6 12 34 56 78",
+  "city": "Paris",
+  "country": "France",
+  "linkedin": "https://www.linkedin.com/in/your-handle",
+  "github": "https://github.com/your-handle",
+  "portfolio": "",
+  "current_title": "Data Scientist",
+  "years_experience": 3,
+  "education_level": "Master",
+  "education_field": "Informatique",
+  "school": "Nom de ton école",
+  "skills": ["Python", "FastAPI", "PostgreSQL", "React", "TypeScript"],
+  "languages": [
+    { "name": "Français", "level": "Natif" },
+    { "name": "Anglais", "level": "C1" }
+  ],
+  "available_from": "2026-06-01",
+  "salary_expectation": "45-55k EUR/an",
+  "summary": "Data scientist orienté produit, 3 ans d'expérience sur des pipelines ML en production. Passionné par les systèmes distribués et l'observabilité.",
+  "cover_letter_template": "Bonjour,\n\nJe candidate avec enthousiasme au poste de {title} chez {company}. Mon parcours en {field} et mes 3 années d'expérience me semblent en parfaite adéquation avec vos besoins.\n\nCordialement,\nAlex Nitescu",
+  "cv_path": "",
+  "_comment": "Copier ce fichier en user_profile.json (gitignoré). cv_path = chemin absolu vers ton PDF, vide pour désactiver l'upload."
+}

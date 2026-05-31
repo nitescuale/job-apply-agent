@@ -26,19 +26,24 @@ interface ScrapeResult {
   [key: string]: unknown
 }
 
-function sendMessageToTab(
+function sendMessageToTab<T = unknown>(
   tabId: number,
   message: unknown,
-): Promise<{ html: string; url: string }> {
+): Promise<T> {
   return new Promise((resolve, reject) => {
     chrome.tabs.sendMessage(tabId, message, (response) => {
       if (chrome.runtime.lastError) {
         reject(new Error('Impossible de contacter la page. Recharge-la et réessaie.'))
         return
       }
-      resolve(response as { html: string; url: string })
+      resolve(response as T)
     })
   })
+}
+
+interface FillReport {
+  filled: string[]
+  skipped: { id: string; reason: string }[]
 }
 
 function fmtRemote(v: boolean | string | undefined): string | undefined {
@@ -407,6 +412,44 @@ const STYLES = `
     margin-bottom: 24px;
   }
 
+  /* --- fill report --- */
+  .jp-fill {
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface);
+    margin-top: 18px;
+  }
+  .jp-fill-line {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    color: var(--text-2);
+    line-height: 1.6;
+  }
+  .jp-fill-line .ok { color: var(--good); }
+  .jp-fill-line .ko { color: var(--bad); }
+  .jp-fill-list {
+    margin: 8px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  .jp-fill-list li {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    line-height: 1.7;
+    color: var(--text-3);
+    padding-left: 18px;
+    position: relative;
+  }
+  .jp-fill-list li::before {
+    content: '·';
+    position: absolute;
+    left: 6px;
+    color: var(--accent);
+  }
+  .jp-fill-list.skipped li::before { color: var(--bad); }
+
   /* fade-in on mount */
   .jp-fade { animation: jp-fade-in 0.4s ease both; }
   .jp-fade-1 { animation-delay: 0.05s; }
@@ -453,6 +496,9 @@ export default function Popup() {
   const [step, setStep] = useState('Capture du HTML')
   const [stepIdx, setStepIdx] = useState(1)
   const [copied, setCopied] = useState(false)
+  const [fillState, setFillState] = useState<'idle' | 'filling' | 'done' | 'error'>('idle')
+  const [fillReport, setFillReport] = useState<FillReport | null>(null)
+  const [fillError, setFillError] = useState('')
 
   async function handleAnalyze() {
     setState('loading')
@@ -463,7 +509,10 @@ export default function Popup() {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
       if (!tab.id) throw new Error('Onglet non trouvé')
 
-      const response = await sendMessageToTab(tab.id, { type: 'CAPTURE_JOB_HTML' })
+      const response = await sendMessageToTab<{ html: string; url: string }>(
+        tab.id,
+        { type: 'CAPTURE_JOB_HTML' },
+      )
       if (!response?.html) throw new Error('Impossible de capturer le HTML')
 
       setStep('Extraction + filtrage LLM')
@@ -504,6 +553,58 @@ export default function Popup() {
     setState('idle')
     setResult(null)
     setError('')
+    setFillState('idle')
+    setFillReport(null)
+    setFillError('')
+  }
+
+  async function handleFillForm() {
+    setFillState('filling')
+    setFillError('')
+    setFillReport(null)
+
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+      if (!tab.id) throw new Error('Onglet non trouvé')
+
+      // 1. Détecte le formulaire sur la page
+      const detected = await sendMessageToTab<{ schema: { fields: unknown[] } | null }>(
+        tab.id,
+        { type: 'DETECT_FORM' },
+      )
+      const schema = detected?.schema
+      if (!schema || !schema.fields || schema.fields.length === 0) {
+        throw new Error('Aucun formulaire détecté sur cette page')
+      }
+
+      // 2. Backend mappe les champs au profil via Gemini
+      const r = result ?? {}
+      const context = { title: r.title, company: r.company, location: r.location }
+      const res = await fetch(`${BACKEND_URL}/fill-form`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ form_schema: schema, context }),
+      })
+
+      if (!res.ok) {
+        const txt = await res.text()
+        throw new Error(`Backend ${res.status} — ${txt.slice(0, 160)}`)
+      }
+
+      const fillPayload = await res.json()
+
+      // 3. Content script applique les valeurs
+      const report = await sendMessageToTab<FillReport>(tab.id, {
+        type: 'FILL_FORM',
+        payload: fillPayload,
+      })
+
+      setFillReport(report)
+      setFillState('done')
+    } catch (err) {
+      setFillError(err instanceof Error ? err.message : 'Erreur inconnue')
+      setFillState('error')
+    }
   }
 
   if (state === 'idle') {
@@ -666,6 +767,73 @@ export default function Popup() {
             <div className="jp-section-label">Description brute</div>
             <div className="jp-description">{r.description}</div>
           </>
+        )}
+
+        <div className="jp-rule" />
+        <div className="jp-section-label">Candidature</div>
+
+        {fillState === 'idle' && (
+          <button
+            className="jp-btn primary"
+            onClick={handleFillForm}
+            style={{ width: '100%' }}
+          >
+            Remplir le formulaire <span className="arrow">→</span>
+          </button>
+        )}
+
+        {fillState === 'filling' && (
+          <div className="jp-fill">
+            <div className="jp-fill-line">remplissage en cours…</div>
+            <div className="jp-loading-bar" style={{ marginTop: 10 }} />
+          </div>
+        )}
+
+        {fillState === 'done' && fillReport && (
+          <div className="jp-fill">
+            <div className="jp-fill-line">
+              <span className="ok">✓</span> {fillReport.filled.length} rempli
+              {fillReport.filled.length > 1 ? 's' : ''}
+              {fillReport.skipped.length > 0 && (
+                <>
+                  {' '}
+                  <span className="ko">·</span> {fillReport.skipped.length} ignoré
+                  {fillReport.skipped.length > 1 ? 's' : ''}
+                </>
+              )}
+            </div>
+            {fillReport.skipped.length > 0 && (
+              <ul className="jp-fill-list skipped">
+                {fillReport.skipped.map((s) => (
+                  <li key={s.id}>
+                    {s.id} — {s.reason}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <button
+              className="jp-btn"
+              onClick={handleFillForm}
+              style={{ width: '100%', marginTop: 12 }}
+            >
+              Recommencer <span className="arrow">↻</span>
+            </button>
+          </div>
+        )}
+
+        {fillState === 'error' && (
+          <div className="jp-fill" style={{ borderColor: '#3a1c18', background: '#1a0d0a' }}>
+            <div className="jp-fill-line" style={{ color: 'var(--bad)' }}>
+              FILL_ERROR · {fillError}
+            </div>
+            <button
+              className="jp-btn"
+              onClick={handleFillForm}
+              style={{ width: '100%', marginTop: 12 }}
+            >
+              Réessayer <span className="arrow">↻</span>
+            </button>
+          </div>
         )}
 
         <div className="jp-actions">
