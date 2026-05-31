@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Job·Apply — Atelier (reference)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  /* ---- design tokens ---- */
+  :root{
+    --bg:#f7f7f5;      /* panel background (app surface) */
+    --pan:#ffffff;     /* cards / bars                   */
+    --ink:#23241f;     /* primary text + primary button  */
+    --mut:#82837b;     /* secondary text / mono labels    */
+    --faint:#b4b5ac;   /* tertiary / empty values         */
+    --line:#e9e9e3;    /* hairline borders + dividers      */
+    --ac:#3d7d5a;      /* accent (AI / match) green        */
+    --ac-soft:#e7f1eb; /* accent tint background           */
+    --sans:'Hanken Grotesk',system-ui,sans-serif;
+    --mono:'Spline Sans Mono',ui-monospace,monospace;
+  }
+  html,body{margin:0;height:100%;}
+  body{background:#e7e7e2;display:flex;align-items:center;justify-content:center;padding:40px;
+    font-family:var(--sans);-webkit-font-smoothing:antialiased;}
+
+  /* ---- panel shell (extension popup / side panel, 400px wide) ---- */
+  .panel{position:relative;width:400px;height:860px;background:var(--bg);color:var(--ink);
+    font-size:14px;line-height:1.5;display:flex;flex-direction:column;
+    border-radius:20px;overflow:hidden;border:1px solid #ececE6;
+    box-shadow:0 18px 50px -20px rgba(40,40,30,.28);}
+
+  /* top bar */
+  .bar{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;
+    border-bottom:1px solid var(--line);background:var(--pan);}
+  .brand{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;letter-spacing:-.01em;}
+  .brand .mark{width:18px;height:18px;border-radius:6px;background:var(--ink);color:#fff;
+    font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;}
+  .kbd{font-family:var(--mono);font-size:10.5px;color:var(--mut);
+    border:1px solid var(--line);border-radius:6px;padding:3px 7px;background:var(--bg);}
+
+  /* body */
+  .body{padding:22px 22px 0;overflow:hidden;}
+  .tag{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;letter-spacing:.04em;
+    color:var(--ac);background:var(--ac-soft);padding:5px 10px;border-radius:7px;margin-bottom:16px;}
+  .company{display:flex;align-items:center;gap:9px;margin-bottom:9px;}
+  .company .logo{width:26px;height:26px;border-radius:7px;background:#eceae2;border:1px solid var(--line);
+    font-size:11px;font-weight:700;color:#6c6d63;display:flex;align-items:center;justify-content:center;}
+  .company span{font-size:13px;color:var(--mut);font-weight:500;}
+  h1{margin:0 0 18px;font-size:22px;line-height:1.22;font-weight:700;letter-spacing:-.02em;}
+
+  /* metadata rows table */
+  .rows{border:1px solid var(--line);border-radius:13px;overflow:hidden;background:var(--pan);margin-bottom:18px;}
+  .row{display:flex;align-items:center;justify-content:space-between;padding:11px 15px;border-bottom:1px solid var(--line);}
+  .row:last-child{border-bottom:none;}
+  .row dt{font-family:var(--mono);font-size:11px;color:var(--mut);letter-spacing:.02em;}
+  .row dd{margin:0;font-size:13.5px;font-weight:600;}
+  .row dd.empty{color:var(--faint);font-weight:500;}
+
+  .desc{color:#54564d;font-size:13px;line-height:1.6;
+    display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;}
+
+  /* footer actions */
+  .foot{margin-top:auto;padding:14px 18px 18px;border-top:1px solid var(--line);background:var(--pan);
+    display:flex;gap:10px;align-items:center;}
+  .cta{flex:1;height:46px;border:none;border-radius:11px;background:var(--ink);color:#fff;
+    font-family:inherit;font-size:13.5px;font-weight:600;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;gap:8px;transition:opacity .15s,transform .1s;}
+  .cta:hover{opacity:.9;}
+  .cta:active{transform:translateY(1px);}
+  .cta .k{font-family:var(--mono);font-size:10px;opacity:.6;
+    border:1px solid rgba(255,255,255,.25);border-radius:5px;padding:2px 5px;}
+  .icon{width:46px;height:46px;border-radius:11px;border:1px solid var(--line);background:var(--bg);
+    color:var(--mut);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s;}
+  .icon:hover{background:#efefe9;}
+</style>
+</head>
+<body>
+  <div class="panel">
+    <div class="bar">
+      <div class="brand"><span class="mark">J</span>Job Apply</div>
+      <span class="kbd">⌘ ↵ pour postuler</span>
+    </div>
+    <div class="body">
+      <span class="tag">✦ filtré par LLM · 92% match</span>
+      <div class="company"><span class="logo">B</span><span>BNP Paribas · Singapour</span></div>
+      <h1>V.I.E — Data Scientist</h1>
+      <dl class="rows">
+        <div class="row"><dt>contrat</dt><dd>V.I.E</dd></div>
+        <div class="row"><dt>salaire</dt><dd class="empty">non précisé</dd></div>
+        <div class="row"><dt>télétravail</dt><dd>Non</dd></div>
+        <div class="row"><dt>expérience</dt><dd>Premier emploi</dd></div>
+        <div class="row"><dt>publié</dt><dd>16 avr. 2026</dd></div>
+      </dl>
+      <p class="desc">Au sein du Data &amp; AI Lab de Global Markets, vous développez des solutions de machine learning pour les activités de marché : automatisation des tâches, outils de recommandation et exploitation de modèles avancés de type LLM.</p>
+    </div>
+    <div class="foot">
+      <button class="cta">Postuler <span class="k">⌘↵</span></button>
+      <button class="icon" aria-label="Voir l'offre d'origine">↗</button>
+    </div>
+  </div>
+</body>
+</html>
