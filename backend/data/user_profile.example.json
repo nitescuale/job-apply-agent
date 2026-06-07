@@ -23,5 +23,7 @@
   "summary": "Data scientist orienté produit, 3 ans d'expérience sur des pipelines ML en production. Passionné par les systèmes distribués et l'observabilité.",
   "cover_letter_template": "Bonjour,\n\nJe candidate avec enthousiasme au poste de {title} chez {company}. Mon parcours en {field} et mes 3 années d'expérience me semblent en parfaite adéquation avec vos besoins.\n\nCordialement,\nAlex Nitescu",
   "cv_path": "",
-  "_comment": "Copier ce fichier en user_profile.json (gitignoré). cv_path = chemin absolu vers ton PDF, vide pour désactiver l'upload."
+  "base_cv_path": "",
+  "cv_output_dir": "",
+  "_comment": "Copier ce fichier en user_profile.json (gitignoré). cv_path = PDF prêt-à-upload (peut rester vide, on génère). base_cv_path = chemin absolu vers ton DOCX source. cv_output_dir = dossier racine où les CV adaptés seront générés (ex: C:/Users/Alex/Documents/CVs)."
 }

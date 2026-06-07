@@ -13,6 +13,7 @@ load_dotenv()
 from backend.agents.job_scraper import scrape_job  # noqa: E402
 from backend.agents import llm_extractor  # noqa: E402
 from backend.agents import form_filler  # noqa: E402
+from backend.agents import cv_tailor  # noqa: E402
 
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
@@ -47,6 +48,10 @@ class FillFormRequest(BaseModel):
     context: dict | None = None
 
 
+class TailorCvRequest(BaseModel):
+    offer: dict
+
+
 @app.get("/health")
 async def health():
     logger.info("GET /health")
@@ -54,6 +59,7 @@ async def health():
         "status": "ok",
         "llm_available": llm_extractor.is_available(),
         "form_filler_available": form_filler.is_available(),
+        "cv_tailor_available": cv_tailor.is_available(),
     }
 
 
@@ -89,6 +95,44 @@ async def fill_form_endpoint(request: FillFormRequest):
     except Exception as exc:  # noqa: BLE001
         logger.exception("fill-form: erreur inattendue")
         raise HTTPException(status_code=500, detail=f"Fill error: {exc}")
+
+
+@app.post("/tailor-cv")
+async def tailor_cv_endpoint(request: TailorCvRequest):
+    """Génère un CV adapté à l'offre via Gemini et le sauve en PDF.
+
+    Args:
+        request.offer: champs structurés de l'offre (title, company, ...).
+
+    Returns:
+        {"saved_path", "filename", "folder", "markdown"} — le markdown est
+        inclus pour permettre une preview côté popup avant ouverture du PDF.
+    """
+    company = (request.offer or {}).get("company")
+    title = (request.offer or {}).get("title")
+    logger.info("POST /tailor-cv — title=%r company=%r", title, company)
+    loop = asyncio.get_running_loop()
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, cv_tailor.tailor_cv, request.offer),
+            timeout=60.0,
+        )
+        return result
+    except FileNotFoundError as exc:
+        logger.error("tailor-cv: ressource absente — %s", exc)
+        raise HTTPException(status_code=412, detail=str(exc))
+    except ValueError as exc:
+        logger.error("tailor-cv: validation — %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc))
+    except RuntimeError as exc:
+        logger.error("tailor-cv: erreur — %s", exc)
+        raise HTTPException(status_code=502, detail=str(exc))
+    except asyncio.TimeoutError:
+        logger.error("tailor-cv: timeout")
+        raise HTTPException(status_code=504, detail="CV tailoring timeout")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("tailor-cv: erreur inattendue")
+        raise HTTPException(status_code=500, detail=f"Tailor error: {exc}")
 
 
 @app.post("/scrape-job")

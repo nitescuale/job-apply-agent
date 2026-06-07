@@ -41,6 +41,15 @@ interface FillReport {
   skipped: { id: string; reason: string }[]
 }
 
+interface CvResult {
+  saved_path: string
+  filename: string
+  folder: string
+  markdown?: string
+}
+
+type CvState = 'idle' | 'generating' | 'done' | 'error'
+
 // ──────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────
@@ -461,6 +470,77 @@ const STYLES = `
     word-break: break-word;
   }
 
+  /* cv tailor card */
+  .ja-cv {
+    border: 1px solid var(--line);
+    border-radius: 13px;
+    background: var(--pan);
+    padding: 14px 15px;
+    margin: 0 0 18px;
+  }
+  .ja-cv-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    color: var(--mut);
+    text-transform: lowercase;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .ja-cv-btn {
+    width: 100%;
+    height: 38px;
+    border-radius: 9px;
+    border: 1px solid var(--line);
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .ja-cv-btn:hover {
+    background: var(--ac-soft);
+    border-color: var(--ac);
+    color: var(--ac);
+  }
+  .ja-cv-btn:disabled { cursor: default; opacity: 0.6; }
+  .ja-cv-btn.success {
+    background: var(--ac-soft);
+    border-color: var(--ac);
+    color: var(--ac);
+  }
+  .ja-cv-file {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--mut);
+    margin: 8px 0 0;
+    word-break: break-all;
+    line-height: 1.5;
+  }
+  .ja-cv-error {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--bad);
+    line-height: 1.5;
+    word-break: break-word;
+  }
+  .ja-spin-dark {
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--line);
+    border-top-color: var(--ink);
+    border-radius: 50%;
+    animation: ja-spin 0.8s linear infinite;
+  }
+
   /* spinner inside CTA */
   .ja-spin {
     width: 14px;
@@ -513,6 +593,9 @@ export default function Popup() {
   const [fillReport, setFillReport] = useState<FillReport | null>(null)
   const [descExpanded, setDescExpanded] = useState(false)
   const [loadingStep, setLoadingStep] = useState({ idx: 1, label: 'Capture de la page' })
+  const [cvState, setCvState] = useState<CvState>('idle')
+  const [cvResult, setCvResult] = useState<CvResult | null>(null)
+  const [cvError, setCvError] = useState('')
 
   async function handleAnalyze() {
     setStatus('scraping')
@@ -605,6 +688,52 @@ export default function Popup() {
     }
   }
 
+  async function handleTailorCv() {
+    if (!result || cvState === 'generating') return
+    setCvState('generating')
+    setCvError('')
+    setCvResult(null)
+
+    try {
+      const offer = {
+        title: result.title,
+        company: result.company,
+        location: result.location,
+        contract_type: result.contract_type ?? result.employment_type,
+        salary: result.salary,
+        remote: result.remote,
+        experience_level: result.experience_level,
+        skills: result.skills,
+        missions: result.missions,
+        summary: result.summary,
+        description: result.description,
+        url: result.url,
+      }
+      const res = await fetch(`${BACKEND_URL}/tailor-cv`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ offer }),
+      })
+      if (!res.ok) {
+        const txt = await res.text()
+        throw new Error(`Backend ${res.status} — ${txt.slice(0, 180)}`)
+      }
+      const data: CvResult = await res.json()
+      setCvResult(data)
+      setCvState('done')
+    } catch (err) {
+      setCvError(err instanceof Error ? err.message : 'Erreur inconnue')
+      setCvState('error')
+    }
+  }
+
+  function handleOpenCv() {
+    if (!cvResult?.saved_path) return
+    // Chrome accepte file:// dans un nouvel onglet pour visualiser un PDF local
+    const url = 'file:///' + cvResult.saved_path.replace(/\\/g, '/')
+    chrome.tabs.create({ url })
+  }
+
   function handleReset() {
     setStatus('idle')
     setResult(null)
@@ -612,6 +741,9 @@ export default function Popup() {
     setApplyError('')
     setFillReport(null)
     setDescExpanded(false)
+    setCvState('idle')
+    setCvResult(null)
+    setCvError('')
   }
 
   // Cmd+Enter / Ctrl+Enter triggers Postuler when result is ready
@@ -754,6 +886,44 @@ export default function Popup() {
               )}
             </>
           )}
+
+          <div className="ja-cv">
+            <div className="ja-cv-label">
+              <span>cv · adapter pour ce poste</span>
+              {cvState === 'done' && <span style={{ color: 'var(--ac)' }}>généré</span>}
+            </div>
+
+            {(cvState === 'idle' || cvState === 'error') && (
+              <button
+                className="ja-cv-btn"
+                onClick={handleTailorCv}
+                disabled={cvState === 'generating'}
+              >
+                Adapter le CV
+              </button>
+            )}
+
+            {cvState === 'generating' && (
+              <button className="ja-cv-btn" disabled>
+                <span className="ja-spin-dark" /> Génération…
+              </button>
+            )}
+
+            {cvState === 'done' && cvResult && (
+              <>
+                <button className="ja-cv-btn success" onClick={handleOpenCv}>
+                  ✓ Ouvrir le PDF
+                </button>
+                <div className="ja-cv-file">{cvResult.filename}</div>
+              </>
+            )}
+
+            {cvState === 'error' && (
+              <div className="ja-cv-error" style={{ marginTop: 8 }}>
+                {cvError}
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="ja-foot">

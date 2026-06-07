@@ -1,0 +1,323 @@
+"""CV tailor — adapte un CV de base (DOCX) à une offre via Gemini, rend en PDF.
+
+Pipeline :
+    1. Lit le DOCX référencé par profile.base_cv_path → texte brut.
+    2. Demande à Gemini de réécrire le CV en Markdown anglais, orienté ATS,
+       en miroitant les mots-clés de l'offre sans inventer de faits.
+    3. Convertit le Markdown → HTML → PDF (WeasyPrint, style ATS-friendly).
+    4. Sauvegarde dans {cv_output_dir}/{Company_Sanitized}/0_cv_*.pdf
+"""
+from __future__ import annotations
+
+import logging
+import os
+import re
+import unicodedata
+from pathlib import Path
+from typing import Any
+
+from .form_filler import load_profile
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_MODEL = "gemini-2.5-flash"
+MAX_BASE_CV_CHARS = 18000
+
+_SYSTEM = """You are a senior CV tailoring expert. You receive:
+1. A base CV (free-form text extracted from a DOCX) — the candidate's full history.
+2. A job offer with extracted essentials (title, company, required skills, missions, etc.).
+3. A structured profile with contact details and facts.
+
+Generate a tailored CV in **English Markdown** that:
+- Reorders and rephrases the candidate's experience to align with the job's requirements.
+- Mirrors keywords from the offer for ATS optimization, without fabricating anything.
+- Stays strictly factual — only use info present in the base CV and the profile.
+- Uses concise, action-oriented bullets starting with strong verbs.
+- Targets one page (~600 words max).
+
+Follow this structure exactly:
+
+# {Full Name}
+{email} · {phone} · {city}, {country}
+{linkedin} · {github}
+
+## Summary
+{2-3 sentences tailored to this offer, in English}
+
+## Experience
+### {Job Title} · {Company}
+*{Date range} · {Location}*
+- {Achievement bullet aligned to the offer}
+- {Another achievement}
+
+## Education
+### {Degree}, {School}
+*{Year}*
+
+## Skills
+{Comma-separated, relevant skills first}
+
+## Languages
+- {Language}: {Level}
+
+Rules:
+- Output English only.
+- Do NOT invent dates, titles, or achievements absent from the base CV.
+- Return ONLY the Markdown content. No fences, no surrounding text."""
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Availability + DOCX reading
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def is_available() -> bool:
+    """Vrai si la clé Gemini et le profil sont configurés."""
+    if not os.getenv("GEMINI_API_KEY"):
+        return False
+    try:
+        profile = load_profile()
+    except FileNotFoundError:
+        return False
+    return bool(profile.get("base_cv_path")) and bool(profile.get("cv_output_dir"))
+
+
+def read_base_cv(path: str | Path) -> str:
+    """Extrait le texte d'un DOCX. Tolère .docx uniquement (pas .doc legacy)."""
+    p = Path(path).expanduser()
+    if not p.is_file():
+        raise FileNotFoundError(f"base_cv_path introuvable: {p}")
+    if p.suffix.lower() != ".docx":
+        raise ValueError(f"base_cv_path doit être un .docx (reçu: {p.suffix})")
+
+    from docx import Document
+
+    doc = Document(str(p))
+    parts: list[str] = []
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if text:
+            parts.append(text)
+    # Tableaux (parfois utilisés pour les sections du CV)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                t = cell.text.strip()
+                if t:
+                    parts.append(t)
+    return "\n".join(parts)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Sanitization + paths
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _slug(s: str | None, *, allow_caps: bool = False) -> str:
+    """Normalise une chaîne pour un nom de fichier/dossier ASCII.
+
+    - décompose les accents (é -> e)
+    - remplace espaces et séparateurs par _
+    - retire le reste hors [a-zA-Z0-9_]
+    """
+    if not s:
+        return ""
+    text = unicodedata.normalize("NFKD", s)
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"[\s/\\\-]+", "_", text)
+    text = re.sub(r"[^A-Za-z0-9_]", "", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text if allow_caps else text.lower()
+
+
+def make_filename(profile: dict[str, Any], offer: dict[str, Any]) -> str:
+    """Convention : 0_cv_firstname_lastname_jobtitle_company.pdf"""
+    parts = [
+        "0",
+        "cv",
+        _slug(profile.get("first_name")) or "x",
+        _slug(profile.get("last_name")) or "x",
+        _slug(offer.get("title")) or "role",
+        _slug(offer.get("company")) or "company",
+    ]
+    base = "_".join(p for p in parts if p)
+    return f"{base}.pdf"
+
+
+def resolve_output_path(profile: dict[str, Any], offer: dict[str, Any]) -> Path:
+    """{cv_output_dir}/{Company_Sanitized}/{filename}.pdf"""
+    root = profile.get("cv_output_dir", "").strip()
+    if not root:
+        raise ValueError("profile.cv_output_dir n'est pas configuré")
+    company_dir = _slug(offer.get("company"), allow_caps=True) or "Unknown_Company"
+    return Path(root).expanduser() / company_dir / make_filename(profile, offer)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# LLM call
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _strip_md_fences(text: str) -> str:
+    cleaned = text.strip()
+    fence = re.match(r"^```(?:markdown|md)?\s*(.*?)\s*```$", cleaned, re.DOTALL)
+    if fence:
+        return fence.group(1).strip()
+    return cleaned
+
+
+def _call_gemini(prompt: str) -> str:
+    """Appelle Gemini en mode texte (pas JSON). Isolé pour faciliter le mock."""
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    model = os.getenv("GEMINI_MODEL") or DEFAULT_MODEL
+
+    logger.info("cv_tailor: appel Gemini (%s)", model)
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=0.4,
+            response_mime_type="text/plain",
+        ),
+    )
+    return response.text or ""
+
+
+def _build_prompt(base_cv: str, offer: dict[str, Any], profile: dict[str, Any]) -> str:
+    """Construit le prompt avec sections délimitées pour Gemini."""
+    import json
+
+    offer_compact = {k: v for k, v in offer.items() if v and k not in ("description", "url")}
+    return (
+        f"{_SYSTEM}\n\n"
+        f"--- BASE CV (DOCX text) ---\n{base_cv[:MAX_BASE_CV_CHARS]}\n\n"
+        f"--- OFFER ESSENTIALS ---\n{json.dumps(offer_compact, ensure_ascii=False, indent=2)}\n\n"
+        f"--- PROFILE FACTS ---\n{json.dumps(profile, ensure_ascii=False, indent=2)}\n"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Markdown → PDF
+# ──────────────────────────────────────────────────────────────────────────
+
+_PDF_CSS = """
+@page { size: A4; margin: 1.6cm 1.8cm; }
+body {
+  font-family: 'Helvetica', 'Arial', sans-serif;
+  font-size: 10.5pt;
+  color: #1a1a1a;
+  line-height: 1.45;
+}
+h1 {
+  font-size: 22pt;
+  margin: 0 0 4pt;
+  letter-spacing: -0.5pt;
+  font-weight: 700;
+}
+h1 + p {
+  color: #555;
+  font-size: 10pt;
+  margin: 0 0 14pt;
+}
+h2 {
+  font-size: 10pt;
+  text-transform: uppercase;
+  letter-spacing: 1.5pt;
+  margin: 14pt 0 6pt;
+  border-bottom: 0.5pt solid #ccc;
+  padding-bottom: 3pt;
+  color: #444;
+}
+h3 {
+  font-size: 11pt;
+  margin: 8pt 0 1pt;
+  font-weight: 600;
+}
+h3 + p em, h3 + p {
+  color: #666;
+  font-style: italic;
+  font-size: 9.5pt;
+  margin: 0 0 4pt;
+  display: block;
+}
+p { margin: 4pt 0; }
+ul { padding-left: 14pt; margin: 4pt 0 8pt; }
+li { margin-bottom: 2pt; }
+strong { font-weight: 600; }
+"""
+
+
+def render_pdf(md_content: str, output_path: Path) -> Path:
+    """Convertit le Markdown en PDF via WeasyPrint et l'écrit à output_path."""
+    import markdown
+    from weasyprint import CSS, HTML
+
+    html_body = markdown.markdown(md_content, extensions=["extra", "sane_lists"])
+    html_full = (
+        "<!doctype html><html><head><meta charset='utf-8'></head>"
+        f"<body>{html_body}</body></html>"
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    HTML(string=html_full).write_pdf(
+        target=str(output_path), stylesheets=[CSS(string=_PDF_CSS)]
+    )
+    return output_path
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Orchestrator
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def tailor_cv(offer: dict[str, Any]) -> dict[str, Any]:
+    """Adapte le CV de base à l'offre, génère un PDF, retourne les métadonnées.
+
+    Args:
+        offer: champs structurés de l'offre (title, company, location, skills, etc.)
+
+    Returns:
+        {
+            "saved_path": str,         # chemin absolu du PDF généré
+            "filename": str,           # nom du fichier seul
+            "folder": str,             # dossier entreprise
+            "markdown": str,           # contenu MD pour debug/preview
+        }
+
+    Raises:
+        FileNotFoundError: profil ou base_cv_path absent
+        ValueError: cv_output_dir manquant ou DOCX invalide
+        RuntimeError: clé API absente ou Gemini KO
+    """
+    if not os.getenv("GEMINI_API_KEY"):
+        raise RuntimeError("GEMINI_API_KEY non configurée")
+
+    profile = load_profile()
+    base_path = profile.get("base_cv_path", "").strip()
+    if not base_path:
+        raise ValueError("profile.base_cv_path n'est pas configuré (DOCX source manquant)")
+
+    base_text = read_base_cv(base_path)
+    if not base_text:
+        raise ValueError("Le DOCX est vide ou illisible")
+
+    output_path = resolve_output_path(profile, offer)
+    prompt = _build_prompt(base_text, offer, profile)
+
+    md_raw = _call_gemini(prompt)
+    md_content = _strip_md_fences(md_raw)
+    if not md_content.strip():
+        raise RuntimeError("Gemini a renvoyé un CV vide")
+
+    render_pdf(md_content, output_path)
+
+    logger.info("cv_tailor: PDF généré -> %s", output_path)
+    return {
+        "saved_path": str(output_path),
+        "filename": output_path.name,
+        "folder": str(output_path.parent),
+        "markdown": md_content,
+    }
