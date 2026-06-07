@@ -1,20 +1,22 @@
 # Job Apply Agent
 
-Extension Chrome qui analyse une offre d'emploi, en extrait les essentiels via
-LLM, et remplit automatiquement le formulaire de candidature à partir d'un
-profil utilisateur stocké en local.
+Chrome extension that analyses a job posting, extracts the essentials via LLM,
+and auto-fills the application form from a locally stored user profile.
 
-> Tu cliques sur une offre, l'extension scrape, filtre, structure, et propose
-> de remplir le formulaire de candidature. Tu relis, tu envoies.
+> Click on a job posting, the extension scrapes, filters, structures, and
+> offers to fill the application form. You review and you submit.
+
+The product UI is in French, but the codebase, docs and commit history are
+in English.
 
 ---
 
 ## Stack
 
 - **Extension** — React 18 + TypeScript, Vite 5 + `@crxjs/vite-plugin` (Manifest V3)
-- **Backend** — Python 3.11+, FastAPI, uvicorn, [Scrapling](https://github.com/D4Vinci/Scrapling) (parser HTML)
-- **LLM** — Google Gemini (`google-genai`), `gemini-2.5-flash`, tier gratuit
-- **Design** — Atelier light, Hanken Grotesk + Spline Sans Mono, un seul accent vert (`#3d7d5a`)
+- **Backend** — Python 3.11+, FastAPI, uvicorn, [Scrapling](https://github.com/D4Vinci/Scrapling) (HTML parser)
+- **LLM** — Google Gemini (`google-genai`), `gemini-2.5-flash`, free tier
+- **Design** — "Atelier" light, Hanken Grotesk + Spline Sans Mono, single green accent (`#3d7d5a`)
 
 ## Architecture
 
@@ -22,67 +24,67 @@ profil utilisateur stocké en local.
 job-apply-agent/
 ├── extension/                       Chrome Extension (Vite + CRXJS)
 │   └── src/
-│       ├── content/scraper.ts       Capture HTML, détecte + remplit le form
-│       └── popup/Popup.tsx          UI 4 états : idle → scraping → ready → applied
+│       ├── content/scraper.ts       Captures HTML, detects + fills the form
+│       └── popup/Popup.tsx          UI, 4 states: idle → scraping → ready → applied
 ├── backend/
-│   ├── main.py                      FastAPI : /health, /scrape-job, /fill-form
+│   ├── main.py                      FastAPI: /health, /scrape-job, /fill-form
 │   ├── agents/
-│   │   ├── job_scraper.py           Scrapling : JSON-LD → meta → fallback texte
-│   │   ├── llm_extractor.py         Gemini : filtre + structure l'essentiel
-│   │   └── form_filler.py           Gemini : mappe form_schema + profil → valeurs
+│   │   ├── job_scraper.py           Scrapling: JSON-LD → meta → text fallback
+│   │   ├── llm_extractor.py         Gemini: filters noise, structures essentials
+│   │   └── form_filler.py           Gemini: maps form_schema + profile → values
 │   └── data/
 │       ├── user_profile.example.json
-│       └── user_profile.json        (gitignoré, c'est le vrai profil)
-├── tests/                           pytest (25 tests verts)
-├── dev.ps1                          Lance backend + Vite en parallèle (Windows)
-└── design_handoff_atelier/          Référence design "Atelier"
+│       └── user_profile.json        (gitignored, your real profile)
+├── tests/                           pytest (25 green tests)
+├── dev.ps1                          Boots backend + Vite in parallel (Windows)
+└── design_handoff_atelier/          "Atelier" design reference
 ```
 
 ## Pipeline
 
-### 1. Analyse d'offre — `POST /scrape-job`
+### 1. Offer analysis — `POST /scrape-job`
 
 ```
-HTML rendu (depuis le content script)
+Rendered HTML (from content script)
         ↓
-Scrapling : JSON-LD JobPosting (@graph aware) → meta Open Graph
-            → sélecteurs site-specific → fallback <title> / <body>
+Scrapling: JSON-LD JobPosting (@graph-aware) → Open Graph meta tags
+           → site-specific selectors → <title>/<body> fallback
         ↓
-LLM Gemini (optionnel) : filtre le bruit, structure title, company,
+Gemini LLM (optional): filters noise, structures title, company,
         location, contract_type, salary, remote, experience_level,
         skills[], missions[], summary
         ↓
-Réponse fusionnée → popup affiche le résultat (Atelier UI)
+Merged response → popup renders the result (Atelier UI)
 ```
 
-Si `GEMINI_API_KEY` absente ou erreur API, l'étape LLM est skipée
-proprement (`llm_used: false`).
+If `GEMINI_API_KEY` is missing or the API fails, the LLM step is gracefully
+skipped (`llm_used: false`).
 
-### 2. Auto-remplissage — `POST /fill-form`
+### 2. Auto-fill — `POST /fill-form`
 
 ```
-Content script DETECT_FORM → schéma {fields: [{id, label, type, ...}]}
+Content script DETECT_FORM → schema {fields: [{id, label, type, ...}]}
         ↓
-Gemini : reçoit form_schema + user_profile + contexte (title, company),
-         retourne {field_id: value} en respectant les règles strictes
-         (n'invente rien, respect des options select/radio, injection
-         de {title}/{company} dans la lettre de motivation)
+Gemini: receives form_schema + user_profile + context (title, company),
+         returns {field_id: value} under strict rules (never invent,
+         respect select/radio options, interpolate {title}/{company}
+         into the cover letter)
         ↓
-Content script FILL_FORM : setter natif React-safe, trick DataTransfer
-         pour <input type=file>, surlignage ambre des champs remplis
+Content script FILL_FORM: React-safe native value setter, DataTransfer
+         trick for <input type=file>, amber highlight on filled fields
         ↓
-Rapport {filled, skipped} affiché dans la popup
+{filled, skipped} report shown in the popup
 ```
 
-## Démarrage rapide
+## Quick start
 
-### Pré-requis
+### Prerequisites
 
 - Node.js 18+
-- Python 3.11+ (testé sur 3.10/3.11)
-- Une clé Gemini gratuite : <https://aistudio.google.com/apikey>
+- Python 3.11+ (also works on 3.10)
+- A free Gemini API key: <https://aistudio.google.com/apikey>
 
-### 1. Cloner et installer
+### 1. Clone and install
 
 ```powershell
 git clone https://github.com/nitescuale/job-apply-agent.git
@@ -99,56 +101,59 @@ npm install
 cd ..
 ```
 
-### 2. Configurer
+### 2. Configure
 
-Crée un `.env` à la racine :
+Create a `.env` at the repo root:
 
 ```
-GEMINI_API_KEY=ta_cle_ici
+GEMINI_API_KEY=your_key_here
 GEMINI_MODEL=gemini-2.5-flash
 ```
 
-Copie le template de profil et adapte-le :
+Copy the profile template and edit it:
 
 ```powershell
 Copy-Item backend\data\user_profile.example.json backend\data\user_profile.json
-# Édite backend\data\user_profile.json (ignored par git)
+# Edit backend\data\user_profile.json (gitignored)
 ```
 
-### 3. Lancer
+### 3. Run
 
 ```powershell
 .\dev.ps1
 ```
 
-Le script tue tout process orphelin sur 8000/5173 puis ouvre deux fenêtres :
-- **Backend** sur <http://localhost:8000> (uvicorn --reload)
-- **Vite** sur <http://localhost:5173> (HMR)
+The script kills any orphan process on ports 8000/5173, then opens two windows:
+- **Backend** on <http://localhost:8000> (uvicorn --reload)
+- **Vite** on <http://localhost:5173> (HMR)
 
-### 4. Charger l'extension dans Chrome
+### 4. Load the extension in Chrome
 
-1. `chrome://extensions/`
-2. Active **Mode développeur**
-3. **Charger l'extension non empaquetée** → sélectionne `extension/dist/`
+1. Go to `chrome://extensions/`
+2. Enable **Developer mode**
+3. **Load unpacked** → select `extension/dist/`
 
-Tant que Vite tourne, les modifs TS/TSX/CSS sont hot-reloadées.
-Pour les changements de `manifest.json`, recharge l'extension manuellement.
+While Vite is running, TS/TSX/CSS changes are hot-reloaded. For `manifest.json`
+changes you need to reload the extension manually.
 
-## Utilisation
+## Usage
 
-1. Ouvre une offre d'emploi (LinkedIn, HelloWork, Indeed, WTTJ, JobTeaser, etc.)
-2. Clique sur l'icône de l'extension → bouton **Analyser la page**
-3. La popup affiche l'offre structurée : titre, entreprise, lieu, contrat, salaire, expérience, dates, description
-4. Si la page contient un formulaire de candidature : bouton **Postuler** (raccourci `Ctrl ↵` / `⌘ ↵`)
-5. L'extension remplit les champs (surlignés en ambre) — tu relis et tu cliques Envoyer toi-même
+1. Open a job posting (LinkedIn, HelloWork, Indeed, WTTJ, JobTeaser, etc.)
+2. Click the extension icon → **Analyser la page** button
+3. The popup renders the structured offer: title, company, location, contract,
+   salary, experience, dates, description
+4. If the page contains an application form: **Postuler** button (shortcut
+   `Ctrl ↵` on Windows/Linux, `⌘ ↵` on macOS)
+5. The extension fills the fields (highlighted in amber) — you review and
+   submit yourself
 
 ## Endpoints
 
-| Méthode | Route          | Description                                     |
-|---------|----------------|-------------------------------------------------|
-| GET     | `/health`      | `{status, llm_available, form_filler_available}` |
-| POST    | `/scrape-job`  | Body : `{job_url, job_html}` → champs structurés |
-| POST    | `/fill-form`   | Body : `{form_schema, context}` → `{values, cv_base64}` |
+| Method | Route          | Description                                            |
+|--------|----------------|--------------------------------------------------------|
+| GET    | `/health`      | `{status, llm_available, form_filler_available}`       |
+| POST   | `/scrape-job`  | Body: `{job_url, job_html}` → structured fields        |
+| POST   | `/fill-form`   | Body: `{form_schema, context}` → `{values, cv_base64}` |
 
 ## Tests
 
@@ -156,40 +161,42 @@ Pour les changements de `manifest.json`, recharge l'extension manuellement.
 pytest -q
 ```
 
-25 tests :
-- `test_job_scraper.py` — JSON-LD, meta, fallback, double-encoding HTML entities
-- `test_llm_extractor.py` — Gemini mocké, JSON malformé, fences markdown
-- `test_form_filler.py` — profil chargé, mapping mocké, base64 CV
+25 tests:
+- `test_job_scraper.py` — JSON-LD, Open Graph meta, fallback, double-encoded HTML entities
+- `test_llm_extractor.py` — mocked Gemini, malformed JSON, markdown fences
+- `test_form_filler.py` — profile loading, mocked mapping, base64 CV reader
 
-## Sites supportés
+## Supported sites
 
-L'extension est active sur **tous les sites** (`<all_urls>` dans le manifest).
-Le scraper JSON-LD couvre nativement HelloWork, Indeed, WTTJ. LinkedIn et
-JobTeaser passent par les sélecteurs site-specific + fallback texte.
+The extension is active on **all sites** (`<all_urls>` in the manifest).
+JSON-LD scraping natively covers HelloWork, Indeed, WTTJ. LinkedIn and
+JobTeaser go through site-specific selectors plus the text fallback.
 
-## Notes techniques
+## Technical notes
 
-- **Encodage** : Windows PowerShell lit les `.ps1` en CP-1252 par défaut.
-  `dev.ps1` est en ASCII pur pour éviter la casse.
-- **uvicorn `--reload`** ne surveille que les `.py`, pas le `.env`. Si tu changes
-  la clé API, redémarre le backend (Ctrl+C + relance ou `dev.ps1` qui kill les
-  orphelins). Sinon le watcher de uvicorn peut respawn un worker enfant avec
-  l'ancien env.
-- **Modèle Gemini** : `gemini-2.0-flash` a été retiré du tier gratuit. Utilise
-  `gemini-2.5-flash` (défaut) ou `gemini-2.5-flash-lite` pour plus de quota.
-- **React-controlled inputs** : le content script utilise `Object.getOwnPropertyDescriptor`
-  pour appeler le setter natif et bypasser React/Vue qui interceptent `.value`.
-- **Upload CV** : `<input type=file>` est rempli via `DataTransfer` + `File`. Marche
-  sur la plupart des formulaires modernes, peut être bloqué par les validations
-  strictes basées sur `isTrusted`.
+- **Encoding** — Windows PowerShell reads `.ps1` files as CP-1252 by default.
+  `dev.ps1` is pure ASCII to avoid breakage.
+- **uvicorn `--reload`** only watches `.py` files, not `.env`. If you change
+  the API key, restart the backend (Ctrl+C + relaunch, or just re-run
+  `dev.ps1` which kills orphans). Otherwise the uvicorn watcher can respawn
+  a child worker with the stale environment.
+- **Gemini model** — `gemini-2.0-flash` was demoted from the free tier. Use
+  `gemini-2.5-flash` (default) or `gemini-2.5-flash-lite` for more headroom.
+- **React-controlled inputs** — the content script uses
+  `Object.getOwnPropertyDescriptor` to call the native setter and bypass
+  React/Vue intercepting `.value`.
+- **CV upload** — `<input type=file>` is filled via `DataTransfer` + `File`.
+  Works on most modern forms; can be blocked by strict validations relying
+  on the `isTrusted` event flag.
 
-## Statut
+## Status
 
-MVP fonctionnel. Le pipeline scrape + LLM tourne sur HelloWork / Indeed / WTTJ.
-LinkedIn rend les champs structurés mais le formulaire Easy Apply n'a pas été
-testé end-to-end. La V1 du form-filler remplit les champs textuels, selects et
-checkboxes ; à valider sur plus d'ATS (Workday, Greenhouse, Lever).
+Functional MVP. The scrape + LLM pipeline runs on HelloWork / Indeed / WTTJ.
+LinkedIn renders the structured fields but the Easy Apply form hasn't been
+tested end-to-end. V1 of the form filler covers text, textarea, select,
+checkbox, radio and file inputs; ATS coverage to validate on Workday,
+Greenhouse, Lever.
 
-## Licence
+## License
 
-Personnel, pas de licence open-source pour l'instant.
+Personal project, no open-source license yet.
