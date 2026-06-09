@@ -1,10 +1,12 @@
 # Job Apply Agent
 
 Chrome extension that analyses a job posting, extracts the essentials via LLM,
-and auto-fills the application form from a locally stored user profile.
+auto-fills the application form from a locally stored profile, and tailors a
+fresh ATS-friendly CV (PDF) to each offer from a base DOCX.
 
-> Click on a job posting, the extension scrapes, filters, structures, and
-> offers to fill the application form. You review and you submit.
+> Click on a job posting, the extension scrapes, filters, structures, generates
+> a tailored CV, and offers to fill the application form. You review and you
+> submit.
 
 The product UI is in French, but the codebase, docs and commit history are
 in English.
@@ -16,6 +18,7 @@ in English.
 - **Extension** — React 18 + TypeScript, Vite 5 + `@crxjs/vite-plugin` (Manifest V3)
 - **Backend** — Python 3.11+, FastAPI, uvicorn, [Scrapling](https://github.com/D4Vinci/Scrapling) (HTML parser)
 - **LLM** — Google Gemini (`google-genai`), `gemini-2.5-flash`, free tier
+- **CV pipeline** — `python-docx` (DOCX input) + `markdown` + `weasyprint` (Markdown → PDF)
 - **Design** — "Atelier" light, Hanken Grotesk + Spline Sans Mono, single green accent (`#3d7d5a`)
 
 ## Architecture
@@ -27,15 +30,16 @@ job-apply-agent/
 │       ├── content/scraper.ts       Captures HTML, detects + fills the form
 │       └── popup/Popup.tsx          UI, 4 states: idle → scraping → ready → applied
 ├── backend/
-│   ├── main.py                      FastAPI: /health, /scrape-job, /fill-form
+│   ├── main.py                      FastAPI: /health, /scrape-job, /fill-form, /tailor-cv
 │   ├── agents/
 │   │   ├── job_scraper.py           Scrapling: JSON-LD → meta → text fallback
 │   │   ├── llm_extractor.py         Gemini: filters noise, structures essentials
-│   │   └── form_filler.py           Gemini: maps form_schema + profile → values
+│   │   ├── form_filler.py           Gemini: maps form_schema + profile → values
+│   │   └── cv_tailor.py             Gemini + WeasyPrint: DOCX base → tailored PDF
 │   └── data/
 │       ├── user_profile.example.json
 │       └── user_profile.json        (gitignored, your real profile)
-├── tests/                           pytest (25 green tests)
+├── tests/                           pytest (41 green tests)
 ├── dev.ps1                          Boots backend + Vite in parallel (Windows)
 └── design_handoff_atelier/          "Atelier" design reference
 ```
@@ -75,6 +79,26 @@ Content script FILL_FORM: React-safe native value setter, DataTransfer
         ↓
 {filled, skipped} report shown in the popup
 ```
+
+### 3. CV tailoring — `POST /tailor-cv`
+
+```
+profile.base_cv_path (DOCX) → python-docx extracts text
+        ↓
+Gemini: receives base CV text + offer essentials + profile facts,
+        returns an English Markdown CV that mirrors offer keywords
+        for ATS, reorders bullets, never fabricates dates/titles,
+        targets one page (~600 words)
+        ↓
+markdown → HTML → WeasyPrint → PDF (A4, Helvetica 10.5pt,
+        uppercase letter-spaced sections, single column)
+        ↓
+Saved to {cv_output_dir}/{Company_Sanitized}/
+         0_cv_firstname_lastname_jobtitle_company.pdf
+```
+
+The popup's "Adapter le CV" button triggers this and opens the resulting
+PDF in a new Chrome tab via `file://`.
 
 ## Quick start
 
@@ -117,6 +141,11 @@ Copy-Item backend\data\user_profile.example.json backend\data\user_profile.json
 # Edit backend\data\user_profile.json (gitignored)
 ```
 
+For CV tailoring, also fill in:
+- `base_cv_path` — absolute path to your source CV in `.docx` format
+- `cv_output_dir` — absolute path to the root folder where tailored PDFs
+  will be written (subfolders are created per company)
+
 ### 3. Run
 
 ```powershell
@@ -142,18 +171,22 @@ changes you need to reload the extension manually.
 2. Click the extension icon → **Analyser la page** button
 3. The popup renders the structured offer: title, company, location, contract,
    salary, experience, dates, description
-4. If the page contains an application form: **Postuler** button (shortcut
+4. **Adapter le CV** generates a tailored PDF in
+   `{cv_output_dir}/{Company}/0_cv_firstname_lastname_jobtitle_company.pdf`
+   and opens it in a new Chrome tab
+5. If the page contains an application form: **Postuler** button (shortcut
    `Ctrl ↵` on Windows/Linux, `⌘ ↵` on macOS)
-5. The extension fills the fields (highlighted in amber) — you review and
+6. The extension fills the fields (highlighted in amber) — you review and
    submit yourself
 
 ## Endpoints
 
-| Method | Route          | Description                                            |
-|--------|----------------|--------------------------------------------------------|
-| GET    | `/health`      | `{status, llm_available, form_filler_available}`       |
-| POST   | `/scrape-job`  | Body: `{job_url, job_html}` → structured fields        |
-| POST   | `/fill-form`   | Body: `{form_schema, context}` → `{values, cv_base64}` |
+| Method | Route          | Description                                                              |
+|--------|----------------|--------------------------------------------------------------------------|
+| GET    | `/health`      | `{status, llm_available, form_filler_available, cv_tailor_available}`    |
+| POST   | `/scrape-job`  | Body: `{job_url, job_html}` → structured fields                          |
+| POST   | `/fill-form`   | Body: `{form_schema, context}` → `{values, cv_base64}`                   |
+| POST   | `/tailor-cv`   | Body: `{offer}` → `{saved_path, filename, folder, markdown}`             |
 
 ## Tests
 
@@ -161,10 +194,13 @@ changes you need to reload the extension manually.
 pytest -q
 ```
 
-25 tests:
+41 tests:
 - `test_job_scraper.py` — JSON-LD, Open Graph meta, fallback, double-encoded HTML entities
 - `test_llm_extractor.py` — mocked Gemini, malformed JSON, markdown fences
 - `test_form_filler.py` — profile loading, mocked mapping, base64 CV reader
+- `test_cv_tailor.py` — slug normalisation, filename convention, DOCX parsing
+  (paragraphs + tables), output path resolution, full orchestration with
+  mocked Gemini + mocked PDF rendering, error paths
 
 ## Supported sites
 
@@ -188,6 +224,10 @@ JobTeaser go through site-specific selectors plus the text fallback.
 - **CV upload** — `<input type=file>` is filled via `DataTransfer` + `File`.
   Works on most modern forms; can be blocked by strict validations relying
   on the `isTrusted` event flag.
+- **CV tailoring** — input is `.docx` only (parsed via `python-docx`).
+  `.doc` legacy is not supported. Slugging strips accents (`L'Oréal` →
+  `LOreal`), normalises separators to `_`, and lowercases the filename
+  while keeping the company folder cased (`BNP_Paribas/`).
 
 ## Status
 
