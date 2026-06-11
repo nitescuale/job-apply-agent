@@ -85,10 +85,18 @@ Content script FILL_FORM: React-safe native value setter, DataTransfer
 ```
 profile.base_cv_path (DOCX) → python-docx extracts text
         ↓
-Gemini: receives base CV text + offer essentials + profile facts,
+(optional, profile.include_summary = true by default)
+Gemini #1: writes a 2-3 sentence SUMMARY with hard rules — only facts
+        from profile / base CV, 2-4 mirrored offer keywords, no banned
+        clichés ("passionate", "team player", "fast learner", ...),
+        no career-goal language that could disqualify for the role.
+        Failure / empty output → no summary section, no crash.
+        ↓
+Gemini #2: receives base CV text + offer essentials + profile facts,
         returns an English Markdown CV that mirrors offer keywords
         for ATS, reorders bullets, never fabricates dates/titles,
-        targets one page (~600 words)
+        targets one page (~600 words). Summary section is NOT written
+        by this pass — it is prepended from the first call.
         ↓
 markdown → HTML → WeasyPrint → PDF (A4, Helvetica 10.5pt,
         uppercase letter-spaced sections, single column)
@@ -98,7 +106,9 @@ Saved to {cv_output_dir}/{Company_Sanitized}/
 ```
 
 The popup's "Adapter le CV" button triggers this and opens the resulting
-PDF in a new Chrome tab via `file://`.
+PDF in a new Chrome tab via `file://`. The response includes a
+`summary_used: bool` flag so callers can tell whether the SUMMARY pass
+ran successfully.
 
 ## Quick start
 
@@ -194,13 +204,16 @@ changes you need to reload the extension manually.
 pytest -q
 ```
 
-41 tests:
+55 tests:
 - `test_job_scraper.py` — JSON-LD, Open Graph meta, fallback, double-encoded HTML entities
 - `test_llm_extractor.py` — mocked Gemini, malformed JSON, markdown fences
 - `test_form_filler.py` — profile loading, mocked mapping, base64 CV reader
 - `test_cv_tailor.py` — slug normalisation, filename convention, DOCX parsing
   (paragraphs + tables), output path resolution, full orchestration with
-  mocked Gemini + mocked PDF rendering, error paths
+  mocked Gemini + mocked PDF rendering, error paths, summary generation
+  (cleaning, quote/fence stripping, empty/short/error fallback, no-API-key
+  short-circuit), `_inject_summary` placement, `include_summary` toggle,
+  banned-cliché audit on a sampled output path
 
 ## Supported sites
 

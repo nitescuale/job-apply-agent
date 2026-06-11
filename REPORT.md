@@ -1,5 +1,74 @@
 # REPORT.md — Job Apply Agent MVP
 
+## 2026-06-09 — Tailored summary in CV pipeline
+
+### Implémenté
+
+- **`backend/agents/cv_tailor.py`** — pipeline élargi : une passe Gemini
+  dédiée génère un SUMMARY de 2-3 phrases avant le pass principal de
+  rédaction du CV. Le SUMMARY est injecté en tête du Markdown (juste avant
+  la première section `## `, ou en fin de doc si aucune) via le helper
+  `_inject_summary`. La passe principale ne produit plus de section
+  "Summary" elle-même (prompt mis à jour : "Do NOT add a Summary, Profile
+  or Objective section").
+- **Garde-fous summary** dans le system prompt dédié :
+  - chaque phrase doit s'appuyer sur un fait concret du profil ou de la
+    base CV (techno, métrique, projet, école, année)
+  - 2-4 keywords du job offer doivent être mirrorés, uniquement si ils
+    sont réellement supportés par le profil
+  - clichés interdits centralisés dans la constante `BANNED_CLICHES`
+    ("passionate", "team player", "fast learner", "results-oriented", …)
+  - pas d'ambitions disqualifiantes (manager sur un poste IC, recherche
+    sur un poste applicatif)
+- **`_clean_summary`** : strip quotes (`"`, `'`, courbes), fences `\`\`\`…\`\`\``,
+  marqueurs heading (`#+ `), préfixes inline `Summary: …` ET premières
+  lignes-mot-clé `Summary\n…` (le modèle insiste parfois pour ajouter
+  un titre).
+- **Dégradation silencieuse** : si la passe SUMMARY échoue (clé API
+  absente, 429, output trop court, exception), `generate_summary`
+  retourne `None` sans lever, le CV est généré sans section SUMMARY,
+  le flag `summary_used: false` est exposé dans la réponse de
+  `/tailor-cv`. Aucun blocage du pipeline principal.
+- **Toggle utilisateur** : `profile.include_summary` (bool, défaut `true`).
+  À `false`, la passe SUMMARY n'est même pas tentée — un seul appel
+  Gemini.
+- **`backend/data/user_profile.example.json`** — ajout du champ
+  `include_summary` documenté dans le `_comment`.
+- **`tests/test_cv_tailor.py`** — 14 tests ajoutés (55 au total) :
+  `generate_summary` happy path, strip quotes/fences/headings, empty,
+  too-short, LLM exception, short-circuit sans clé API ; `_inject_summary`
+  ordering vs premier `##`, append-when-no-h2, noop sur summary vide ;
+  intégration `tailor_cv` avec `include_summary=true|false` et avec
+  l'erreur LLM sur la 1ère passe ; audit "aucun cliché interdit dans
+  l'output mocké" + sanity check sur la constante elle-même.
+
+### Décisions
+
+- **Deux passes plutôt qu'une** : passer le SUMMARY dans le prompt
+  principal a été écarté — l'isoler permet un prompt dédié avec règles
+  strictes (clichés, garde-fous d'ambition) sans alourdir le prompt
+  principal, et la passe principale ne consomme pas de tokens à écrire
+  un Summary qui sera de toute façon réécrit.
+- **Injection texte plutôt que prompt-feeding** : `_inject_summary`
+  fait une simple insertion Markdown plutôt que de demander au modèle
+  principal d'inclure un résumé déjà écrit. C'est plus déterministe
+  (pas de risque de paraphrase) et plus simple à tester.
+- **Pas d'enforcement runtime des clichés** : les `BANNED_CLICHES` sont
+  une contrainte du prompt, pas un filtre côté code. Le test
+  documente l'invariant sans pénaliser un faux positif (e.g. "team"
+  dans un autre contexte).
+- **Logging discret** : `cv_tailor: summary=ok|skipped` en INFO, pas
+  d'alarme sur le `skipped` (c'est une dégradation acceptée).
+
+### Blocages
+
+- Aucun. Tests verts du premier coup hors une réécriture mineure
+  de `_clean_summary` pour gérer le cas `## Summary\n{texte}`
+  (mot-clé seul sur sa ligne, sans `:` ou `-` suivants), repéré par
+  les tests `strips_quotes_and_fences`.
+
+---
+
 ## Date
 2026-02-22
 

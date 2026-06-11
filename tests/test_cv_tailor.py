@@ -180,6 +180,7 @@ def test_tailor_cv_orchestrates_end_to_end(tmp_path, profile_in_tmp, monkeypatch
         profile_in_tmp,
         base_cv_path=str(docx_path),
         cv_output_dir=str(out_dir),
+        include_summary=False,  # legacy orchestration check — summary covered in dedicated tests
     )
     monkeypatch.setenv("GEMINI_API_KEY", "fake")
 
@@ -233,3 +234,215 @@ def test_tailor_cv_empty_llm_response_raises(tmp_path, profile_in_tmp, monkeypat
     with patch.object(cv_tailor, "_call_gemini", return_value="   "):
         with pytest.raises(RuntimeError, match="vide"):
             cv_tailor.tailor_cv(SAMPLE_OFFER)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Summary generation (new)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+VALID_SUMMARY = (
+    "Data Scientist with 3 years building Python ML pipelines on AWS, including "
+    "FastAPI services in production at a previous fintech role. Comfortable "
+    "with Spark workloads and infrastructure cost optimization, both keywords "
+    "from this BNP Paribas Senior Data Engineer brief."
+)
+
+
+def test_generate_summary_returns_clean_text(profile_in_tmp, monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+    with patch.object(cv_tailor, "_call_gemini", return_value=VALID_SUMMARY) as mock:
+        out = cv_tailor.generate_summary(SAMPLE_OFFER, SAMPLE_PROFILE, "base cv content")
+    assert mock.called
+    assert out == VALID_SUMMARY
+
+
+def test_generate_summary_strips_quotes_and_fences(profile_in_tmp, monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+    cases = [
+        f'"{VALID_SUMMARY}"',
+        f"'{VALID_SUMMARY}'",
+        f"```\n{VALID_SUMMARY}\n```",
+        f"Summary: {VALID_SUMMARY}",
+        f"## Summary\n{VALID_SUMMARY}",
+    ]
+    for raw in cases:
+        with patch.object(cv_tailor, "_call_gemini", return_value=raw):
+            out = cv_tailor.generate_summary(SAMPLE_OFFER, SAMPLE_PROFILE)
+        assert out == VALID_SUMMARY, f"unexpected output for input {raw!r}: {out!r}"
+
+
+def test_generate_summary_returns_none_on_empty(profile_in_tmp, monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+    for empty in ("", "   ", "\n\n"):
+        with patch.object(cv_tailor, "_call_gemini", return_value=empty):
+            assert cv_tailor.generate_summary(SAMPLE_OFFER, SAMPLE_PROFILE) is None
+
+
+def test_generate_summary_returns_none_on_too_short(profile_in_tmp, monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+    with patch.object(cv_tailor, "_call_gemini", return_value="too short"):
+        assert cv_tailor.generate_summary(SAMPLE_OFFER, SAMPLE_PROFILE) is None
+
+
+def test_generate_summary_returns_none_when_llm_raises(profile_in_tmp, monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+    with patch.object(cv_tailor, "_call_gemini", side_effect=RuntimeError("429 quota")):
+        assert cv_tailor.generate_summary(SAMPLE_OFFER, SAMPLE_PROFILE) is None
+
+
+def test_generate_summary_returns_none_without_api_key(profile_in_tmp, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    with patch.object(cv_tailor, "_call_gemini") as mock:
+        assert cv_tailor.generate_summary(SAMPLE_OFFER, SAMPLE_PROFILE) is None
+    # Must short-circuit before the network call
+    mock.assert_not_called()
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _inject_summary
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_inject_summary_inserts_before_first_h2():
+    md = "# Name\nemail · phone\n\n## Experience\n### Role\n- did things\n"
+    out = cv_tailor._inject_summary(md, VALID_SUMMARY)
+    assert "## SUMMARY" in out
+    assert out.index("## SUMMARY") < out.index("## Experience")
+
+
+def test_inject_summary_appends_when_no_h2():
+    md = "# Name\nemail · phone\n"
+    out = cv_tailor._inject_summary(md, VALID_SUMMARY)
+    assert "## SUMMARY" in out
+    assert out.rstrip().endswith(VALID_SUMMARY)
+
+
+def test_inject_summary_noop_on_empty_summary():
+    md = "# Name\n\n## Experience\n- x\n"
+    assert cv_tailor._inject_summary(md, "") == md
+    assert cv_tailor._inject_summary(md, "   ".strip()) == md
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# tailor_cv integration with summary toggle
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _make_docx(tmp_path: Path, content: str = "Alex Nitescu — Data Scientist") -> Path:
+    from docx import Document
+
+    p = tmp_path / "base.docx"
+    doc = Document()
+    for line in content.split("\n"):
+        doc.add_paragraph(line)
+    doc.save(str(p))
+    return p
+
+
+def test_tailor_cv_includes_summary_when_enabled(tmp_path, profile_in_tmp, monkeypatch):
+    docx_path = _make_docx(tmp_path)
+    write_profile(
+        profile_in_tmp,
+        base_cv_path=str(docx_path),
+        cv_output_dir=str(tmp_path / "CVs"),
+        include_summary=True,
+    )
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+
+    main_cv = "# Alex Nitescu\nalex@example.com\n\n## Experience\n- something\n"
+    # First call = summary, second call = main CV
+    with patch.object(
+        cv_tailor, "_call_gemini", side_effect=[VALID_SUMMARY, main_cv]
+    ) as mock, patch.object(cv_tailor, "render_pdf"):
+        result = cv_tailor.tailor_cv(SAMPLE_OFFER)
+
+    assert mock.call_count == 2
+    assert result["summary_used"] is True
+    assert "## SUMMARY" in result["markdown"]
+    assert VALID_SUMMARY in result["markdown"]
+    # SUMMARY must come before Experience
+    assert result["markdown"].index("## SUMMARY") < result["markdown"].index("## Experience")
+
+
+def test_tailor_cv_skips_summary_when_disabled(tmp_path, profile_in_tmp, monkeypatch):
+    docx_path = _make_docx(tmp_path)
+    write_profile(
+        profile_in_tmp,
+        base_cv_path=str(docx_path),
+        cv_output_dir=str(tmp_path / "CVs"),
+        include_summary=False,
+    )
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+
+    main_cv = "# Alex Nitescu\nalex@example.com\n\n## Experience\n- something\n"
+    with patch.object(cv_tailor, "_call_gemini", side_effect=[main_cv]) as mock, patch.object(
+        cv_tailor, "render_pdf"
+    ):
+        result = cv_tailor.tailor_cv(SAMPLE_OFFER)
+
+    # Only ONE LLM call (the main CV); summary step is skipped entirely
+    assert mock.call_count == 1
+    assert result["summary_used"] is False
+    assert "## SUMMARY" not in result["markdown"]
+
+
+def test_tailor_cv_skips_summary_silently_on_llm_error(tmp_path, profile_in_tmp, monkeypatch):
+    docx_path = _make_docx(tmp_path)
+    write_profile(
+        profile_in_tmp,
+        base_cv_path=str(docx_path),
+        cv_output_dir=str(tmp_path / "CVs"),
+        include_summary=True,
+    )
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+
+    main_cv = "# Alex Nitescu\nalex@example.com\n\n## Experience\n- something\n"
+    # Summary call raises, main CV call succeeds. tailor_cv must NOT raise.
+    with patch.object(
+        cv_tailor,
+        "_call_gemini",
+        side_effect=[RuntimeError("429 quota"), main_cv],
+    ), patch.object(cv_tailor, "render_pdf"):
+        result = cv_tailor.tailor_cv(SAMPLE_OFFER)
+
+    assert result["summary_used"] is False
+    assert "## SUMMARY" not in result["markdown"]
+    # Main CV is still there
+    assert "## Experience" in result["markdown"]
+
+
+def test_tailor_cv_output_contains_no_banned_cliches(tmp_path, profile_in_tmp, monkeypatch):
+    """Sampled path: with clean mocked outputs, none of the banned clichés
+    must appear in the final Markdown. Documents the constraint and guards
+    against the test fixtures themselves drifting into clichéd phrasing."""
+    docx_path = _make_docx(tmp_path)
+    write_profile(
+        profile_in_tmp,
+        base_cv_path=str(docx_path),
+        cv_output_dir=str(tmp_path / "CVs"),
+        include_summary=True,
+    )
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+
+    clean_main_cv = (
+        "# Alex Nitescu\nalex@example.com\n\n"
+        "## Experience\n### Data Scientist · ACME\n*2023-2026 · Paris*\n"
+        "- Built ML pipelines on AWS using Python and FastAPI.\n"
+        "- Optimized Spark job costs by 30%.\n\n"
+        "## Skills\nPython, FastAPI, AWS, Spark\n"
+    )
+
+    with patch.object(
+        cv_tailor, "_call_gemini", side_effect=[VALID_SUMMARY, clean_main_cv]
+    ), patch.object(cv_tailor, "render_pdf"):
+        result = cv_tailor.tailor_cv(SAMPLE_OFFER)
+
+    lowered = result["markdown"].lower()
+    for phrase in cv_tailor.BANNED_CLICHES:
+        assert phrase not in lowered, f"banned cliché leaked into output: {phrase!r}"
+
+
+def test_banned_cliches_constant_is_non_empty():
+    assert len(cv_tailor.BANNED_CLICHES) >= 5
+    assert all(isinstance(p, str) and p == p.lower() for p in cv_tailor.BANNED_CLICHES)

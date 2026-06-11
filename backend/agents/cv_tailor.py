@@ -22,6 +22,24 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gemini-2.5-flash"
 MAX_BASE_CV_CHARS = 18000
+SUMMARY_MIN_LENGTH = 30
+
+# Banned cliché phrases — kept as a module constant so tests can import and
+# enforce. Case-insensitive substring match.
+BANNED_CLICHES: tuple[str, ...] = (
+    "passionate",
+    "driven",
+    "hard-working",
+    "hard working",
+    "team player",
+    "fast learner",
+    "hit the ground running",
+    "always on the lookout",
+    "results-oriented",
+    "results oriented",
+    "self-motivated",
+    "self motivated",
+)
 
 _SYSTEM = """You are a senior CV tailoring expert. You receive:
 1. A base CV (free-form text extracted from a DOCX) — the candidate's full history.
@@ -40,9 +58,6 @@ Follow this structure exactly:
 # {Full Name}
 {email} · {phone} · {city}, {country}
 {linkedin} · {github}
-
-## Summary
-{2-3 sentences tailored to this offer, in English}
 
 ## Experience
 ### {Job Title} · {Company}
@@ -63,7 +78,37 @@ Follow this structure exactly:
 Rules:
 - Output English only.
 - Do NOT invent dates, titles, or achievements absent from the base CV.
+- Do NOT add a "Summary", "Profile" or "Objective" section — the summary is
+  prepended separately by another pass.
 - Return ONLY the Markdown content. No fences, no surrounding text."""
+
+
+_SUMMARY_SYSTEM = """You write the top-of-CV professional summary that appears
+above Experience on a one-page tailored CV.
+
+Output ONLY the summary text. 2 to 3 sentences. Plain prose, no preamble,
+no markdown, no quotes, no bullets, no header.
+
+HARD RULES:
+- Every sentence must reference a concrete, verifiable fact taken from PROFILE
+  or BASE_CV (a technology, a metric, a project, an experience, a year, a
+  school). Never invent metrics, employers, titles, technologies or dates.
+- Mirror 2-4 keywords from the OFFER (job title and required skills) — only
+  those genuinely supported by PROFILE/BASE_CV. Never claim a skill the
+  candidate does not have.
+- Open with positioning aligned to the offer's job title.
+- Language: English only.
+
+BANNED PHRASES (never use, even once): "passionate", "driven", "hard-working",
+"team player", "fast learner", "hit the ground running", "always on the
+lookout", "results-oriented", "self-motivated".
+
+NEVER state ambitions that could disqualify the candidate for THIS offer:
+- No "looking to move into management" on an IC role.
+- No "transitioning into research" on an applied role.
+- If you mention a goal, derive it from the offer itself.
+
+Output: 2 to 3 sentences of prose. Nothing else."""
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -200,6 +245,102 @@ def _build_prompt(base_cv: str, offer: dict[str, Any], profile: dict[str, Any]) 
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Summary generation (separate Gemini pass, optional)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _clean_summary(raw: str) -> str:
+    """Trim quotes, fences and stray markdown headings from the LLM output."""
+    text = raw.strip()
+    # Strip surrounding quotes (single, double, smart)
+    for q in ('"', "'", "“", "”", "‘", "’"):
+        if text.startswith(q) and text.endswith(q) and len(text) > 1:
+            text = text[1:-1].strip()
+    # Strip accidental code fence
+    fence = re.match(r"^```[a-zA-Z]*\s*(.*?)\s*```$", text, re.DOTALL)
+    if fence:
+        text = fence.group(1).strip()
+    # Strip accidental leading heading marker
+    text = re.sub(r"^#+\s*", "", text).strip()
+    # Drop a leading "Summary" line — handles both "Summary: ..." (inline)
+    # and "Summary\n..." (heading-style)
+    text = re.sub(
+        r"^(summary|profile|objective)\s*[:\-—]\s*", "", text, flags=re.IGNORECASE
+    ).strip()
+    first_line, *rest = text.split("\n", 1)
+    if first_line.strip().lower() in {"summary", "profile", "objective"} and rest:
+        text = rest[0].strip()
+    return text
+
+
+def generate_summary(
+    offer: dict[str, Any],
+    profile: dict[str, Any],
+    base_cv_text: str = "",
+) -> str | None:
+    """Generate a 2-3 sentence ATS-friendly summary tailored to the offer.
+
+    Args:
+        offer: structured offer essentials (title, company, skills, missions, ...).
+        profile: user_profile.json content (facts only, not the cover letter).
+        base_cv_text: raw text extracted from the candidate's base DOCX. Provides
+            additional concrete facts the structured profile may not expose.
+
+    Returns:
+        The cleaned summary string, or None if the step is disabled, the LLM
+        is unavailable, returns empty/short/invalid output, or any unexpected
+        error occurs. Never raises — the caller falls back to no summary.
+    """
+    if not os.getenv("GEMINI_API_KEY"):
+        logger.info("cv_tailor: summary skipped (no GEMINI_API_KEY)")
+        return None
+
+    import json
+
+    offer_compact = {
+        k: v
+        for k, v in offer.items()
+        if v and k in {"title", "company", "skills", "missions", "experience_level"}
+    }
+    prompt = (
+        f"{_SUMMARY_SYSTEM}\n\n"
+        f"--- OFFER ---\n{json.dumps(offer_compact, ensure_ascii=False, indent=2)}\n\n"
+        f"--- PROFILE ---\n{json.dumps(profile, ensure_ascii=False, indent=2)}\n\n"
+        f"--- BASE_CV ---\n{base_cv_text[:8000]}"
+    )
+
+    try:
+        raw = _call_gemini(prompt)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("cv_tailor: summary generation failed — %s", exc)
+        return None
+
+    cleaned = _clean_summary(raw or "")
+    if not cleaned or len(cleaned) < SUMMARY_MIN_LENGTH:
+        logger.info("cv_tailor: summary empty or too short, skipping")
+        return None
+
+    return cleaned
+
+
+def _inject_summary(md: str, summary: str) -> str:
+    """Insert a '## SUMMARY' section before the first existing '## ' heading.
+
+    If the Markdown has no other '## ' section, the SUMMARY block is appended
+    at the end. Idempotent on a SUMMARY-free input.
+    """
+    if not summary:
+        return md
+    block = f"## SUMMARY\n{summary}\n\n"
+    lines = md.split("\n")
+    for i, line in enumerate(lines):
+        if line.startswith("## "):
+            return "\n".join(lines[:i]) + ("\n" if i else "") + block + "\n".join(lines[i:])
+    # No H2 section — append at the end
+    return md.rstrip() + "\n\n" + block.rstrip() + "\n"
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Markdown → PDF
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -305,12 +446,25 @@ def tailor_cv(offer: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Le DOCX est vide ou illisible")
 
     output_path = resolve_output_path(profile, offer)
-    prompt = _build_prompt(base_text, offer, profile)
 
+    # Optional tailored summary (default on). Failure is non-blocking.
+    include_summary = profile.get("include_summary", True)
+    summary: str | None = None
+    if include_summary:
+        summary = generate_summary(offer, profile, base_text)
+        logger.info(
+            "cv_tailor: summary=%s",
+            "ok" if summary else "skipped",
+        )
+
+    prompt = _build_prompt(base_text, offer, profile)
     md_raw = _call_gemini(prompt)
     md_content = _strip_md_fences(md_raw)
     if not md_content.strip():
         raise RuntimeError("Gemini a renvoyé un CV vide")
+
+    if summary:
+        md_content = _inject_summary(md_content, summary)
 
     render_pdf(md_content, output_path)
 
@@ -320,4 +474,5 @@ def tailor_cv(offer: dict[str, Any]) -> dict[str, Any]:
         "filename": output_path.name,
         "folder": str(output_path.parent),
         "markdown": md_content,
+        "summary_used": bool(summary),
     }
