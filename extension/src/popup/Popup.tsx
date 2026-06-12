@@ -31,6 +31,9 @@ interface OfferResult {
   description?: string
   match_score?: number
   source?: string
+  skills?: string[]
+  missions?: string[]
+  summary?: string
   llm_used?: boolean
   llm_error?: string
   [key: string]: unknown
@@ -46,6 +49,7 @@ interface CvResult {
   filename: string
   folder: string
   markdown?: string
+  summary_used?: boolean
 }
 
 type CvState = 'idle' | 'generating' | 'done' | 'error'
@@ -894,11 +898,7 @@ export default function Popup() {
             </div>
 
             {(cvState === 'idle' || cvState === 'error') && (
-              <button
-                className="ja-cv-btn"
-                onClick={handleTailorCv}
-                disabled={cvState === 'generating'}
-              >
+              <button className="ja-cv-btn" onClick={handleTailorCv}>
                 Adapter le CV
               </button>
             )}

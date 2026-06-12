@@ -191,4 +191,10 @@ async def scrape_job_endpoint(request: ScrapeRequest):
     else:
         logger.info("scrape-job: GEMINI_API_KEY absente, étape LLM ignorée")
 
+    # Réaffirme l'URL après le merge LLM : protège contre une éventuelle
+    # surcharge (la passe Gemini ne devrait pas renvoyer 'url', mais on
+    # garantit ici que la popup peut toujours ouvrir l'offre d'origine
+    # et que le pipeline cv_tailor reçoit bien l'URL.)
+    result["url"] = request.job_url
+
     return result

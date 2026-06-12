@@ -39,7 +39,7 @@ job-apply-agent/
 │   └── data/
 │       ├── user_profile.example.json
 │       └── user_profile.json        (gitignored, your real profile)
-├── tests/                           pytest (41 green tests)
+├── tests/                           pytest (55 green tests)
 ├── dev.ps1                          Boots backend + Vite in parallel (Windows)
 └── design_handoff_atelier/          "Atelier" design reference
 ```
@@ -196,7 +196,7 @@ changes you need to reload the extension manually.
 | GET    | `/health`      | `{status, llm_available, form_filler_available, cv_tailor_available}`    |
 | POST   | `/scrape-job`  | Body: `{job_url, job_html}` → structured fields                          |
 | POST   | `/fill-form`   | Body: `{form_schema, context}` → `{values, cv_base64}`                   |
-| POST   | `/tailor-cv`   | Body: `{offer}` → `{saved_path, filename, folder, markdown}`             |
+| POST   | `/tailor-cv`   | Body: `{offer}` → `{saved_path, filename, folder, markdown, summary_used}` |
 
 ## Tests
 

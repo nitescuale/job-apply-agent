@@ -72,6 +72,13 @@
 ## Date
 2026-02-22
 
+> **⚠ Superseded — historique uniquement.** Cette entrée décrit une
+> architecture antérieure basée sur Anthropic Claude avec les agents
+> `cv_adapter.py`, `job_analyzer.py`, `orchestrator.py` et l'endpoint
+> `/analyze-and-adapt`. Depuis le pivot vers Scrapling + Gemini (commit
+> `416f219`, février 2026), ces fichiers et endpoints n'existent plus.
+> Conservée pour traçabilité de session.
+
 ## Ce qui est implémenté
 
 ### Backend (FastAPI)
