@@ -8,13 +8,13 @@ const SHORTCUT_HINT = IS_MAC ? '⌘ ↵ pour postuler' : 'Ctrl ↵ pour postuler
 const SHORTCUT_KEYCAP = IS_MAC ? '⌘↵' : 'Ctrl ↵'
 
 type Status =
-  | 'idle'        // before any analysis
+  | 'idle'        // before any analysis — direct entry to all 3 actions
   | 'scraping'    // analysing the page
   | 'ready'       // result panel shown, ready to apply
-  | 'applying'    // auto-apply in flight
+  | 'applying'    // auto-apply in flight (with or without offer context)
   | 'applied'     // form filled successfully
   | 'error'       // analysis error
-  | 'apply-error' // apply error (keep showing result)
+  | 'apply-error' // apply error (keep showing whatever was shown before)
 
 interface OfferResult {
   url?: string
@@ -329,6 +329,15 @@ const STYLES = `
   .ja-cta.success {
     background: var(--ac);
   }
+  .ja-cta.ja-cta-secondary {
+    background: var(--pan);
+    color: var(--ink);
+    border: 1px solid var(--line);
+  }
+  .ja-cta.ja-cta-secondary:hover {
+    background: #efefe9;
+    opacity: 1;
+  }
   .ja-keycap {
     font-family: var(--mono);
     font-size: 10px;
@@ -336,6 +345,12 @@ const STYLES = `
     border: 1px solid rgba(255, 255, 255, 0.25);
     border-radius: 5px;
     padding: 2px 5px;
+  }
+  .ja-keycap.dark {
+    color: var(--mut);
+    border-color: var(--line);
+    background: var(--bg);
+    opacity: 1;
   }
   .ja-icon {
     width: 46px;
@@ -641,7 +656,7 @@ export default function Popup() {
   }
 
   async function handleApply() {
-    if (status === 'applying' || !result) return
+    if (status === 'applying') return
     setStatus('applying')
     setApplyError('')
     setFillReport(null)
@@ -658,11 +673,12 @@ export default function Popup() {
         throw new Error('Aucun formulaire détecté sur cette page')
       }
 
-      const context = {
-        title: result.title,
-        company: result.company,
-        location: result.location,
-      }
+      // Si l'offre n'a pas été analysée au préalable (entrée directe depuis la
+      // page de candidature), on envoie un contexte vide — Gemini se base
+      // alors uniquement sur le profil pour remplir les champs.
+      const context = result
+        ? { title: result.title, company: result.company, location: result.location }
+        : {}
       const res = await fetch(`${BACKEND_URL}/fill-form`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -750,11 +766,12 @@ export default function Popup() {
     setCvError('')
   }
 
-  // Cmd+Enter / Ctrl+Enter triggers Postuler when result is ready
+  // Cmd+Enter / Ctrl+Enter triggers Postuler dès qu'on peut remplir un form
+  // (idle = direct entry, ready = après analyse, apply-error = retry)
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-        if (status === 'ready' || status === 'apply-error') {
+        if (status === 'idle' || status === 'ready' || status === 'apply-error') {
           e.preventDefault()
           handleApply()
         }
@@ -774,14 +791,70 @@ export default function Popup() {
         <div className="ja-panel">
           <TopBar showShortcut={false} />
           <div className="ja-idle">
-            <h1>Analyser cette page.</h1>
+            <h1>Page d'offre ou de candidature ?</h1>
             <p>
-              Scraping structurel, filtrage LLM,{' '}essentiels structurés. Tu valides et tu
-              postules.
+              Si tu es sur l'offre, analyse-la d'abord. Si tu es déjà sur le
+              formulaire, lance directement le remplissage.
             </p>
             <button className="ja-cta" onClick={handleAnalyze}>
               Analyser la page
             </button>
+            <button className="ja-cta ja-cta-secondary" onClick={handleApply}>
+              Remplir le formulaire <span className="ja-keycap dark">{SHORTCUT_KEYCAP}</span>
+            </button>
+          </div>
+        </div>
+      </>
+    )
+  }
+
+  // Cas "remplir sans analyse" — applying / applied / apply-error sans result
+  if (!result && (status === 'applying' || status === 'applied' || status === 'apply-error')) {
+    return (
+      <>
+        <style>{STYLES}</style>
+        <div className="ja-panel">
+          <TopBar showShortcut={false} />
+          <div className="ja-idle">
+            <h1>Remplissage du formulaire.</h1>
+            {status === 'applying' && (
+              <>
+                <p>Détection des champs et mapping via Gemini…</p>
+                <div className="ja-bar-scan" style={{ width: '100%' }} />
+              </>
+            )}
+            {status === 'applied' && fillReport && (
+              <>
+                <p>
+                  <span style={{ color: 'var(--ac)', fontWeight: 600 }}>
+                    {fillReport.filled.length} champ{fillReport.filled.length > 1 ? 's' : ''} rempli{fillReport.filled.length > 1 ? 's' : ''}
+                  </span>
+                  {fillReport.skipped.length > 0 && (
+                    <>
+                      {' · '}
+                      <span style={{ color: 'var(--bad)' }}>
+                        {fillReport.skipped.length} ignoré{fillReport.skipped.length > 1 ? 's' : ''}
+                      </span>
+                    </>
+                  )}
+                  . Vérifie les champs surlignés en ambre et soumets toi-même.
+                </p>
+                <button className="ja-cta" onClick={handleReset}>
+                  Terminer
+                </button>
+              </>
+            )}
+            {status === 'apply-error' && (
+              <>
+                <p style={{ color: 'var(--bad)' }}>{applyError}</p>
+                <button className="ja-cta" onClick={handleApply}>
+                  Réessayer
+                </button>
+                <button className="ja-cta ja-cta-secondary" onClick={handleReset}>
+                  Retour
+                </button>
+              </>
+            )}
           </div>
         </div>
       </>
