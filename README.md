@@ -175,6 +175,25 @@ The script kills any orphan process on ports 8000/5173, then opens two windows:
 While Vite is running, TS/TSX/CSS changes are hot-reloaded. For `manifest.json`
 changes you need to reload the extension manually.
 
+### 4-bis. Load the extension in Firefox
+
+```powershell
+cd extension
+npm run build:firefox
+```
+
+Produces `extension/dist-firefox/` — a Firefox MV3 build patched from the
+Chrome dist: gecko id, classic background script instead of ESM service
+worker, `data_collection_permissions: ["none"]`. Validated with
+`web-ext lint` (0 errors / 0 notices). Then load it:
+
+1. Open `about:debugging#/runtime/this-firefox`
+2. **Load Temporary Add-on…** → pick `manifest.json` inside `dist-firefox/`
+
+Temporary add-ons survive until Firefox restarts. The first time you click
+**Adapter le CV** in Firefox, you may need to grant the add-on permission to
+open `file://` URLs so the generated PDF can preview in a new tab.
+
 ## Usage
 
 1. Open a job posting (LinkedIn, HelloWork, Indeed, WTTJ, JobTeaser, etc.)

@@ -147,6 +147,31 @@ Codes d'erreur :
   + CORS pour origines `chrome-extension://*` (sinon CRXJS bind IPv6 et
   Chrome appelle IPv4 → connection refused).
 
+## Builds
+
+- `npm run build` (depuis `extension/`) → `extension/dist/` — Chrome MV3,
+  service worker module CRXJS.
+- `npm run build:firefox` → invoque `scripts/build-firefox.mjs` qui :
+  1. lance `vite build`
+  2. copie `dist/` → `dist-firefox/`
+  3. patche le manifest pour Firefox MV3 :
+     - ajoute `browser_specific_settings.gecko.{id, strict_min_version: "121.0",
+       data_collection_permissions: { required: ["none"] }}`
+     - convertit `background.service_worker` (module ESM) en
+       `background.scripts` (script classique) en pointant directement
+       sur le bundle `assets/background.ts-*.js` et en supprimant le
+       loader CRXJS qui utilisait `import`.
+  4. valide le manifest reparsé + check `web-ext lint` propre (0
+     erreur, 0 notice ; 2 warnings React `innerHTML` attendus).
+- Chargement Firefox : `about:debugging#/runtime/this-firefox` →
+  "Load Temporary Add-on" → pointer un fichier dans `dist-firefox/`.
+  Tient jusqu'au prochain restart de Firefox (limitation des temporary
+  add-ons).
+- Caveat Firefox : `chrome.tabs.create({url: "file:///..."})` (ouverture
+  du PDF tailored) peut être bloqué par la sandbox profil. Sur Chrome
+  ça marche tel quel ; sur Firefox il faut accepter l'accès aux fichiers
+  locaux lors du premier prompt.
+
 ## Règles importantes
 
 - **Logger** chaque appel API dans `backend/logs/{date}.log` (INFO + erreurs).

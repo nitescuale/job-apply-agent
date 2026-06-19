@@ -13,6 +13,8 @@ __pycache__/
 # Node / build
 node_modules/
 extension/dist/
+extension/dist-firefox/
+extension/web-ext-artifacts/
 
 # Tooling local
 .claude/
