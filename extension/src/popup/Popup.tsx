@@ -1051,20 +1051,6 @@ export default function Popup() {
             {expires && <Row label="expire" value={expires} />}
           </dl>
 
-          {r.description && (
-            <>
-              <p className={`ja-desc${descExpanded ? ' expanded' : ''}`}>{r.description}</p>
-              {r.description.length > 180 && (
-                <button
-                  className="ja-desc-more"
-                  onClick={() => setDescExpanded((v) => !v)}
-                >
-                  {descExpanded ? '— Réduire' : '+ Lire la suite'}
-                </button>
-              )}
-            </>
-          )}
-
           <div className="ja-cv">
             <div className="ja-cv-label">
               <span>cv · adapter pour ce poste</span>
@@ -1098,6 +1084,20 @@ export default function Popup() {
               </div>
             )}
           </div>
+
+          {r.description && (
+            <>
+              <p className={`ja-desc${descExpanded ? ' expanded' : ''}`}>{r.description}</p>
+              {r.description.length > 180 && (
+                <button
+                  className="ja-desc-more"
+                  onClick={() => setDescExpanded((v) => !v)}
+                >
+                  {descExpanded ? '— Réduire' : '+ Lire la suite'}
+                </button>
+              )}
+            </>
+          )}
         </div>
 
         <div className="ja-foot">
