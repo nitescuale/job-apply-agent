@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 
 const BACKEND_URL = 'http://localhost:8000'
+const STORAGE_KEY = 'job-apply-popup-state'
 
 const IS_MAC =
   typeof navigator !== 'undefined' && /mac/i.test(navigator.platform || navigator.userAgent)
@@ -423,14 +424,6 @@ const STYLES = `
   .ja-loading {
     padding: 56px 22px 40px;
   }
-  .ja-loading-step {
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: 0.04em;
-    color: var(--mut);
-    margin-bottom: 12px;
-  }
-  .ja-loading-step .idx { color: var(--ac); }
   .ja-loading-msg {
     font-size: 18px;
     font-weight: 600;
@@ -611,10 +604,70 @@ export default function Popup() {
   const [applyError, setApplyError] = useState('')
   const [fillReport, setFillReport] = useState<FillReport | null>(null)
   const [descExpanded, setDescExpanded] = useState(false)
-  const [loadingStep, setLoadingStep] = useState({ idx: 1, label: 'Capture de la page' })
   const [cvState, setCvState] = useState<CvState>('idle')
   const [cvResult, setCvResult] = useState<CvResult | null>(null)
   const [cvError, setCvError] = useState('')
+  // Le popup MV3 est détruit dès qu'on clique en dehors. On persiste
+  // l'état dans chrome.storage.local pour ne rien perdre entre deux
+  // ouvertures (résultat d'analyse, CV généré, rapport de fill).
+  const [hydrated, setHydrated] = useState(false)
+
+  // Hydrate au mount
+  useEffect(() => {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+      setHydrated(true)
+      return
+    }
+    chrome.storage.local.get(STORAGE_KEY, (data) => {
+      const saved = data[STORAGE_KEY] as Partial<{
+        status: Status
+        result: OfferResult | null
+        error: string
+        applyError: string
+        fillReport: FillReport | null
+        cvState: CvState
+        cvResult: CvResult | null
+        cvError: string
+      }> | undefined
+      if (saved) {
+        // Les états transitoires (in-flight) sont morts avec le popup —
+        // on les rabat sur un état stable au lieu de re-spinner à vide.
+        let s: Status = saved.status ?? 'idle'
+        if (s === 'scraping') s = 'idle'
+        if (s === 'applying') s = saved.result ? 'ready' : 'idle'
+        setStatus(s)
+        setResult(saved.result ?? null)
+        setError(saved.error ?? '')
+        setApplyError(saved.applyError ?? '')
+        setFillReport(saved.fillReport ?? null)
+        let cv: CvState = saved.cvState ?? 'idle'
+        if (cv === 'generating') cv = 'idle'
+        setCvState(cv)
+        setCvResult(saved.cvResult ?? null)
+        setCvError(saved.cvError ?? '')
+      }
+      setHydrated(true)
+    })
+  }, [])
+
+  // Persiste à chaque changement (après hydrate seulement, pour ne pas
+  // écraser l'état stocké avec les defaults pendant le 1er render).
+  useEffect(() => {
+    if (!hydrated) return
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) return
+    chrome.storage.local.set({
+      [STORAGE_KEY]: {
+        status,
+        result,
+        error,
+        applyError,
+        fillReport,
+        cvState,
+        cvResult,
+        cvError,
+      },
+    })
+  }, [hydrated, status, result, error, applyError, fillReport, cvState, cvResult, cvError])
 
   async function handleAnalyze() {
     setStatus('scraping')
@@ -622,7 +675,6 @@ export default function Popup() {
     setApplyError('')
     setFillReport(null)
     setDescExpanded(false)
-    setLoadingStep({ idx: 1, label: 'Capture de la page' })
 
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
@@ -632,8 +684,6 @@ export default function Popup() {
         type: 'CAPTURE_JOB_HTML',
       })
       if (!response?.html) throw new Error('Impossible de capturer le HTML')
-
-      setLoadingStep({ idx: 2, label: 'Extraction + filtrage LLM' })
 
       const r = await fetch(`${BACKEND_URL}/scrape-job`, {
         method: 'POST',
@@ -868,10 +918,7 @@ export default function Popup() {
         <div className="ja-panel">
           <TopBar showShortcut={false} />
           <div className="ja-loading">
-            <div className="ja-loading-step">
-              étape <span className="idx">0{loadingStep.idx}</span> / 02
-            </div>
-            <div className="ja-loading-msg">{loadingStep.label}…</div>
+            <div className="ja-loading-msg">Extraction + filtrage LLM…</div>
             <div className="ja-bar-scan" />
           </div>
         </div>

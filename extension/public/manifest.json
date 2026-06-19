@@ -3,7 +3,7 @@
   "name": "Job Apply Agent",
   "version": "0.1.0",
   "description": "Analyse les offres d'emploi et adapte ton CV automatiquement",
-  "permissions": ["activeTab", "scripting"],
+  "permissions": ["activeTab", "scripting", "storage"],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_popup": "src/popup/index.html",
