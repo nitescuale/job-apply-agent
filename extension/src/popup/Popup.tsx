@@ -108,7 +108,9 @@ const STYLES = `
 
   .ja-panel {
     width: 400px;
-    min-height: 480px;
+    height: 600px;          /* Chrome/Firefox cap popups around 600px;
+                               on borne la panel pour que le body scroll
+                               proprement au lieu de se faire clipper. */
     background: var(--bg);
     color: var(--ink);
     font-family: var(--sans);
@@ -126,9 +128,7 @@ const STYLES = `
     padding: 14px 18px;
     border-bottom: 1px solid var(--line);
     background: var(--pan);
-    position: sticky;
-    top: 0;
-    z-index: 5;
+    flex-shrink: 0;
   }
   .ja-brand {
     display: flex;
@@ -192,6 +192,9 @@ const STYLES = `
     padding: 22px 22px 0;
     overflow-y: auto;
     flex: 1;
+    min-height: 0;          /* requis : sinon en flex column les enfants
+                               refusent de shrink sous leur contenu et
+                               le scroll ne s'active jamais. */
   }
   .ja-tag {
     display: inline-flex;
@@ -315,7 +318,6 @@ const STYLES = `
 
   /* footer */
   .ja-foot {
-    margin-top: auto;
     padding: 14px 18px 18px;
     border-top: 1px solid var(--line);
     background: var(--pan);
@@ -323,8 +325,7 @@ const STYLES = `
     gap: 10px;
     align-items: center;
     flex-direction: column;
-    position: sticky;
-    bottom: 0;
+    flex-shrink: 0;
   }
   .ja-foot-row {
     display: flex;
