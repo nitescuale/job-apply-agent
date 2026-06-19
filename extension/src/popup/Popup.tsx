@@ -161,6 +161,31 @@ const STYLES = `
     background: var(--bg);
     white-space: nowrap;
   }
+  .ja-bar-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .ja-bar-reset {
+    width: 26px;
+    height: 26px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: var(--bg);
+    color: var(--mut);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .ja-bar-reset:hover {
+    background: var(--ac-soft);
+    border-color: var(--ac);
+    color: var(--ac);
+  }
 
   /* body */
   .ja-body {
@@ -571,16 +596,45 @@ const STYLES = `
 // Sub-components
 // ──────────────────────────────────────────────────────────────────────────
 
-function TopBar({ showShortcut }: { showShortcut: boolean }) {
+function TopBar({
+  showShortcut,
+  onReset,
+}: {
+  showShortcut: boolean
+  onReset?: () => void
+}) {
   return (
     <div className="ja-bar">
       <div className="ja-brand">
         <span className="ja-mark">J</span>
         Job Apply
       </div>
-      {showShortcut && <span className="ja-kbd">{SHORTCUT_HINT}</span>}
+      <div className="ja-bar-right">
+        {showShortcut && <span className="ja-kbd">{SHORTCUT_HINT}</span>}
+        {onReset && (
+          <button
+            type="button"
+            className="ja-bar-reset"
+            onClick={onReset}
+            aria-label="Réinitialiser"
+            title="Réinitialiser (nouvelle offre)"
+          >
+            ↺
+          </button>
+        )}
+      </div>
     </div>
   )
+}
+
+function friendlyFetchError(err: unknown): string {
+  // Firefox renvoie "NetworkError when attempting to fetch resource.",
+  // Chrome renvoie "Failed to fetch". Dans les deux cas c'est un TypeError
+  // levé par fetch() quand la connexion TCP n'aboutit pas.
+  if (err instanceof TypeError && /fetch|network/i.test(err.message)) {
+    return 'Backend injoignable sur localhost:8000. Lance .\\dev.ps1 puis réessaie.'
+  }
+  return err instanceof Error ? err.message : 'Erreur inconnue'
 }
 
 function Row({ label, value }: { label: string; value: string | null }) {
@@ -700,7 +754,7 @@ export default function Popup() {
       setResult(data)
       setStatus('ready')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erreur inconnue')
+      setError(friendlyFetchError(err))
       setStatus('error')
     }
   }
@@ -747,7 +801,7 @@ export default function Popup() {
       setFillReport(report)
       setStatus('applied')
     } catch (err) {
-      setApplyError(err instanceof Error ? err.message : 'Erreur inconnue')
+      setApplyError(friendlyFetchError(err))
       setStatus('apply-error')
     }
   }
@@ -792,7 +846,7 @@ export default function Popup() {
       setCvResult(data)
       setCvState('done')
     } catch (err) {
-      setCvError(err instanceof Error ? err.message : 'Erreur inconnue')
+      setCvError(friendlyFetchError(err))
       setCvState('error')
     }
   }
@@ -864,7 +918,7 @@ export default function Popup() {
       <>
         <style>{STYLES}</style>
         <div className="ja-panel">
-          <TopBar showShortcut={false} />
+          <TopBar showShortcut={false} onReset={handleReset} />
           <div className="ja-idle">
             <h1>Remplissage du formulaire.</h1>
             {status === 'applying' && (
@@ -916,7 +970,7 @@ export default function Popup() {
       <>
         <style>{STYLES}</style>
         <div className="ja-panel">
-          <TopBar showShortcut={false} />
+          <TopBar showShortcut={false} onReset={handleReset} />
           <div className="ja-loading">
             <div className="ja-loading-msg">Extraction + filtrage LLM…</div>
             <div className="ja-bar-scan" />
@@ -931,7 +985,7 @@ export default function Popup() {
       <>
         <style>{STYLES}</style>
         <div className="ja-panel">
-          <TopBar showShortcut={false} />
+          <TopBar showShortcut={false} onReset={handleReset} />
           <div className="ja-error">
             <div className="ja-err-label">erreur · analyse</div>
             <div className="ja-err-msg">Échec de l'analyse.</div>
@@ -967,7 +1021,7 @@ export default function Popup() {
     <>
       <style>{STYLES}</style>
       <div className="ja-panel">
-        <TopBar showShortcut={status === 'ready'} />
+        <TopBar showShortcut={status === 'ready'} onReset={handleReset} />
 
         <div className="ja-body">
           {r.llm_used ? (
