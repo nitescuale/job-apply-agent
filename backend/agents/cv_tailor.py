@@ -47,41 +47,52 @@ _SYSTEM = """You are a senior CV tailoring expert. You receive:
 2. A job offer with extracted essentials (title, company, required skills, missions, etc.).
 3. A structured profile with contact details and facts.
 
-Generate a tailored CV in **English Markdown** that:
-- Reorders and rephrases the candidate's experience to align with the job's requirements.
-- Mirrors keywords from the offer for ATS optimization, without fabricating anything.
-- Stays strictly factual — only use info present in the base CV and the profile.
-- Uses concise, action-oriented bullets starting with strong verbs.
-- Targets one page (~600 words max).
-
-Follow this structure exactly:
+Generate a tailored CV in **English Markdown** with a STRICT structure designed
+for a clean two-column layout (left = content, right = date/location). Use the
+EXACT '||' separator (two pipes) to mark left/right splits.
 
 # {Full Name}
-{email} · {phone} · {city}, {country}
-{linkedin} · {github}
+{Tagline — one short line, e.g. "2026 Data Scientist / AI&ML Engineer Graduate"}
+{Contact line, ONE line: City, Country — Phone — Email — github.com/handle — linkedin.com/in/handle}
 
-## Experience
-### {Job Title} · {Company}
-*{Date range} · {Location}*
-- {Achievement bullet aligned to the offer}
-- {Another achievement}
+## EXPERIENCE
 
-## Education
-### {Degree}, {School}
-*{Year}*
+### {Company} || {Location}
+{Optional one-line company description, plain prose}
+**{Job Title}** || *{Date range}*
+- {Action-verb achievement, mirrors offer keywords, never invents}
+- {Another bullet}
 
-## Skills
-{Comma-separated, relevant skills first}
+(repeat the block above per job)
 
-## Languages
+## PROJECTS
+
+### {Project name}
+{One sentence describing what it is and the stack}
+- {Bullet}
+- {Bullet}
+
+## EDUCATION
+
+### {School} || {Location}
+**{Program / Degree}** || *{Year range}*
+{Optional one-line list of relevant coursework}
+
+## SKILLS
+{Comma-separated, offer-relevant skills first, grouped if natural}
+
+## LANGUAGES
 - {Language}: {Level}
 
-Rules:
-- Output English only.
-- Do NOT invent dates, titles, or achievements absent from the base CV.
-- Do NOT add a "Summary", "Profile" or "Objective" section — the summary is
-  prepended separately by another pass.
-- Return ONLY the Markdown content. No fences, no surrounding text."""
+Hard rules:
+- Output English Markdown ONLY. No fences, no preamble.
+- The '||' MUST appear exactly once per header line (no spaces around them
+  matter, the parser trims). If a line has no right-hand value, OMIT the line.
+- Do NOT invent dates, titles, employers, or achievements absent from the
+  base CV / profile.
+- Do NOT add a "Summary", "Profile" or "Objective" section — a separate pass
+  prepends the SUMMARY.
+- Target one page (~600 words). Action verbs, no clichés."""
 
 
 _SUMMARY_SYSTEM = """You write the top-of-CV professional summary that appears
@@ -346,50 +357,198 @@ def _inject_summary(md: str, summary: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────
 
 _PDF_CSS = """
-@page { size: A4; margin: 1.6cm 1.8cm; }
+@page { size: A4; margin: 1.4cm 1.6cm; }
 body {
-  font-family: 'Helvetica', 'Arial', sans-serif;
+  font-family: 'Times', 'Times New Roman', serif;
   font-size: 10.5pt;
   color: #1a1a1a;
-  line-height: 1.45;
+  line-height: 1.38;
 }
+
+/* Header — centered, à la traditional CV */
 h1 {
-  font-size: 22pt;
-  margin: 0 0 4pt;
-  letter-spacing: -0.5pt;
+  font-size: 19pt;
   font-weight: 700;
+  text-align: center;
+  margin: 0 0 2pt;
 }
-h1 + p {
-  color: #555;
+.tagline {
+  text-align: center;
+  font-size: 12pt;
+  font-weight: 700;
+  margin: 0 0 2pt;
+}
+.contact {
+  text-align: center;
   font-size: 10pt;
-  margin: 0 0 14pt;
+  color: #333;
+  margin: 0 0 12pt;
 }
+
+/* Section headers — uppercase + souligné */
 h2 {
-  font-size: 10pt;
+  font-size: 11pt;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 1.5pt;
-  margin: 14pt 0 6pt;
-  border-bottom: 0.5pt solid #ccc;
-  padding-bottom: 3pt;
-  color: #444;
+  margin: 11pt 0 4pt;
+  border-bottom: 0.6pt solid #000;
+  padding-bottom: 1pt;
 }
+
+/* Job / project / school header — h3 simple ou table 2 cols */
 h3 {
   font-size: 11pt;
-  margin: 8pt 0 1pt;
-  font-weight: 600;
+  font-weight: 700;
+  margin: 7pt 0 1pt;
 }
-h3 + p em, h3 + p {
-  color: #666;
-  font-style: italic;
+
+/* Table 2 cols pour "Company || Location" et "**Title** || *Date*" */
+table.row {
+  width: 100%;
+  margin: 0 0 1pt;
+  border: 0;
+}
+table.row td.left {
+  text-align: left;
+  vertical-align: top;
+}
+table.row td.right {
+  text-align: right;
+  vertical-align: top;
+}
+table.row td.bold { font-weight: 700; }
+table.row td.italic { font-style: italic; }
+
+/* Description courte sous l'en-tête de job (italic, gris discret) */
+.desc {
   font-size: 9.5pt;
-  margin: 0 0 4pt;
-  display: block;
+  color: #555;
+  font-style: italic;
+  margin: 0 0 1pt;
 }
-p { margin: 4pt 0; }
-ul { padding-left: 14pt; margin: 4pt 0 8pt; }
-li { margin-bottom: 2pt; }
-strong { font-weight: 600; }
+
+p { margin: 2pt 0; }
+ul {
+  padding-left: 16pt;
+  margin: 3pt 0 4pt;
+}
+li {
+  margin-bottom: 1pt;
+}
+strong { font-weight: 700; }
+em { font-style: italic; }
 """
+
+
+def _inline_md(text: str) -> str:
+    """Inline markdown : **bold** -> <strong>, *italic* -> <em>."""
+    text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+    text = re.sub(r"(?<!\*)\*([^\*]+?)\*(?!\*)", r"<em>\1</em>", text)
+    return text
+
+
+def _strip_outer_bold(text: str) -> str:
+    m = re.match(r"^\*\*(.+?)\*\*$", text)
+    return _inline_md(m.group(1) if m else text)
+
+
+def _strip_outer_emph(text: str) -> str:
+    m = re.match(r"^\*(.+?)\*$", text)
+    return _inline_md(m.group(1) if m else text)
+
+
+def _md_to_html(md: str) -> str:
+    """Convertit notre Markdown 'tailoré CV' en HTML avec layout 2-colonnes.
+
+    Convention :
+      # Nom                              -> <h1>
+      Ligne 2                            -> tagline centrée
+      Ligne 3                            -> contact centré
+      ## SECTION                         -> <h2> souligné
+      ### Company || Location            -> table 2 cols (gauche bold)
+      **Job Title** || *Date range*      -> table 2 cols (gauche bold, droite italic)
+      - bullet                           -> <li> dans <ul>
+      texte                              -> <p>
+    """
+    lines = md.split("\n")
+    out: list[str] = []
+    in_list = False
+    in_header_region = False
+    header_lines_taken = 0  # 0 = tagline, 1+ = contact
+
+    def close_list() -> None:
+        nonlocal in_list
+        if in_list:
+            out.append("</ul>")
+            in_list = False
+
+    for raw in lines:
+        s = raw.strip()
+
+        if not s:
+            close_list()
+            continue
+
+        if s.startswith("# "):
+            close_list()
+            out.append(f"<h1>{_inline_md(s[2:].strip())}</h1>")
+            in_header_region = True
+            header_lines_taken = 0
+            continue
+
+        if s.startswith("## "):
+            close_list()
+            in_header_region = False
+            out.append(f"<h2>{_inline_md(s[3:].strip())}</h2>")
+            continue
+
+        if s.startswith("### "):
+            close_list()
+            in_header_region = False
+            content = s[4:].strip()
+            if "||" in content:
+                left, right = (x.strip() for x in content.split("||", 1))
+                out.append(
+                    '<table class="row"><tr>'
+                    f'<td class="left bold">{_inline_md(left)}</td>'
+                    f'<td class="right">{_inline_md(right)}</td>'
+                    "</tr></table>"
+                )
+            else:
+                out.append(f"<h3>{_inline_md(content)}</h3>")
+            continue
+
+        if s.startswith("- "):
+            in_header_region = False
+            if not in_list:
+                out.append("<ul>")
+                in_list = True
+            out.append(f"<li>{_inline_md(s[2:])}</li>")
+            continue
+
+        if s.startswith("**") and "||" in s:
+            close_list()
+            left, right = (x.strip() for x in s.split("||", 1))
+            out.append(
+                '<table class="row"><tr>'
+                f'<td class="left bold">{_strip_outer_bold(left)}</td>'
+                f'<td class="right italic">{_strip_outer_emph(right)}</td>'
+                "</tr></table>"
+            )
+            continue
+
+        if in_header_region:
+            close_list()
+            cls = "tagline" if header_lines_taken == 0 else "contact"
+            out.append(f'<p class="{cls}">{_inline_md(s)}</p>')
+            header_lines_taken += 1
+            continue
+
+        close_list()
+        out.append(f"<p>{_inline_md(s)}</p>")
+
+    close_list()
+    return "\n".join(out)
 
 
 def render_pdf(md_content: str, output_path: Path) -> Path:
@@ -397,12 +556,13 @@ def render_pdf(md_content: str, output_path: Path) -> Path:
 
     xhtml2pdf est 100% Python (reportlab + html5lib en interne) et n'a
     aucune dépendance système — contrairement à WeasyPrint qui demande
-    GTK/Pango/Cairo, problématique sous Windows.
+    GTK/Pango/Cairo, problématique sous Windows. On évite la lib
+    `markdown` car xhtml2pdf ne supporte pas le flex ; on émet
+    directement des <table> 2-colonnes pour le layout pro.
     """
-    import markdown
     from xhtml2pdf import pisa
 
-    html_body = markdown.markdown(md_content, extensions=["extra", "sane_lists"])
+    html_body = _md_to_html(md_content)
     html_full = (
         "<!doctype html><html><head><meta charset='utf-8'>"
         f"<style>{_PDF_CSS}</style></head>"
@@ -413,9 +573,7 @@ def render_pdf(md_content: str, output_path: Path) -> Path:
     with open(output_path, "wb") as f:
         result = pisa.CreatePDF(src=html_full, dest=f, encoding="utf-8")
     if result.err:
-        raise RuntimeError(
-            f"xhtml2pdf a échoué ({result.err} erreur(s) de rendu)"
-        )
+        raise RuntimeError(f"xhtml2pdf a échoué ({result.err} erreur(s) de rendu)")
     return output_path
 
 
