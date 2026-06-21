@@ -5,7 +5,6 @@ pydantic==2.9.0
 scrapling>=0.2.90
 google-genai>=1.0.0
 python-docx>=1.1.0
-xhtml2pdf>=0.2.16
-markdown>=3.6
+docx2pdf>=0.1.8
 pytest==8.3.0
 pytest-asyncio==0.24.0

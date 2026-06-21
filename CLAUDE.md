@@ -10,8 +10,9 @@ FastAPI. Le backend :
    → meta Open Graph → sélecteurs site-specific → fallback texte) puis affine
    le résultat via Gemini (filtre + structure : titre, entreprise, skills,
    missions, summary).
-2. génère un CV adapté à l'offre depuis un DOCX de base + le profil
-   utilisateur, rendu en PDF ATS-friendly via xhtml2pdf.
+2. génère un CV adapté à l'offre en éditant **en place** le DOCX source
+   de l'utilisateur (forme inchangée, contenu textuel tailoré), puis
+   convertit en PDF via Word/LibreOffice.
 3. détecte le formulaire de candidature et le remplit (text, select, radio,
    checkbox, file) à partir du profil + contexte de l'offre via Gemini.
 
@@ -35,8 +36,10 @@ job-apply-agent/
 │   │   ├── job_scraper.py          Scrapling : JSON-LD → meta → site → texte
 │   │   ├── llm_extractor.py        Gemini : filtre/structure l'offre
 │   │   ├── form_filler.py          Gemini : profil + form_schema → values
-│   │   └── cv_tailor.py            Gemini (2 passes : summary + CV) +
-│   │                               python-docx + xhtml2pdf → PDF
+│   │   └── cv_tailor.py            python-docx édite en place les
+│   │                               paragraphes éditables (run-level),
+│   │                               Gemini renvoie {idx: new_text},
+│   │                               docx2pdf (Word) → PDF
 │   └── data/
 │       ├── user_profile.example.json
 │       └── user_profile.json       gitignoré (profil réel)
@@ -56,9 +59,11 @@ job-apply-agent/
   Manifest V3
 - **Backend** : Python 3.11+ (3.10 ok), FastAPI, uvicorn, **Scrapling** (HTML)
 - **LLM** : Google Gemini (`google-genai`), `gemini-2.5-flash`, tier gratuit
-- **CV pipeline** : `python-docx` (DOCX in), `markdown` + `xhtml2pdf` (PDF out,
-  pure Python — pas de dépendance système, contrairement à WeasyPrint qui
-  exige GTK/Pango sous Windows)
+- **CV pipeline** : `python-docx` édite **en place** les paragraphes
+  éditables du DOCX source (texte des runs remplacé, formatting/styles
+  préservés), puis `docx2pdf` convertit en PDF via Word COM (qualité
+  maximale) avec fallback LibreOffice headless. Le DOCX généré et le PDF
+  sont sauvegardés côte à côte.
 - **Design** : Hanken Grotesk + Spline Sans Mono + JetBrains Mono, fond
   `#f7f7f5`, accent vert `#3d7d5a`
 
@@ -80,23 +85,45 @@ job-apply-agent/
 
 ### 2. `/tailor-cv` — CV adapté en PDF
 
-1. `profile.base_cv_path` (DOCX) → `python-docx` extrait le texte
-   (paragraphes + tables).
-2. **Passe Gemini #1 — SUMMARY** (si `profile.include_summary`, défaut `true`) :
-   2-3 phrases avec règles dures — uniquement des faits issus du profil/CV
-   base, 2-4 keywords de l'offre mirrorés, clichés interdits centralisés
-   dans `BANNED_CLICHES` (passionate, team player, fast learner…), pas
-   d'ambitions disqualifiantes. Échec / output trop court → `None`, pas de
-   crash, `summary_used: false`.
-3. **Passe Gemini #2 — CV** : reçoit le CV base + l'offre + le profil,
-   renvoie un Markdown anglais qui mirror les keywords pour l'ATS, réordonne
-   les bullets, n'invente jamais dates ni titres, vise ~600 mots. Cette
-   passe ne produit PAS de section Summary (le prompt l'interdit) — le
-   summary est injecté ensuite via `_inject_summary` avant le premier `## `.
-4. Markdown → HTML → **xhtml2pdf** PDF (A4, Helvetica 10.5pt, marges 1.6cm,
-   sections uppercase letter-spaced, mono-colonne ATS-friendly).
-5. Sauvegarde : `{cv_output_dir}/{Company_Sanitized}/0_cv_firstname_lastname_jobtitle_company.pdf`.
-   `_slug` normalise via `unicodedata.NFKD` + regex (`L'Oréal` → `LOreal`).
+Principe : on ne ré-écrit pas la mise en page. On charge **le DOCX
+existant** de l'utilisateur, on identifie les paragraphes qui sont du
+contenu (vs de la mise en page), on demande à Gemini une version
+tailorée de leur texte, on remplace le texte des runs en gardant le
+formatting d'origine, et on convertit le résultat en PDF via Word ou
+LibreOffice.
+
+1. `profile.base_cv_path` (DOCX) → `python-docx` charge le document et
+   `_collect_paragraphs` parcourt les paragraphes top-level + les
+   paragraphes dans les cellules de table, dans l'ordre de lecture.
+2. **Heuristique `_is_editable`** filtre les paragraphes substantiels :
+   - longueur ≥ 25 chars (skip noms, dates courtes)
+   - pas de tabulation (skip lignes alignées tab-séparées)
+   - pas tout-en-majuscules (skip en-têtes de section EXPERIENCE...)
+   - pas d'@ ou pattern contact (skip email, téléphone, URL).
+3. **Passe Gemini** : reçoit `{indices: texte original}` pour chaque
+   paragraphe éditable + l'offre + le profil. Doit renvoyer un JSON
+   `{idx: nouveau_texte}` — keys = indices des paragraphes à modifier,
+   values = versions tailorées (±25% de longueur, ATS-keywords mirrorés,
+   pas d'invention, clichés `BANNED_CLICHES` interdits). Omet les
+   indices qu'il choisit de laisser inchangés.
+4. **`_set_paragraph_text`** : pour chaque édition, met le nouveau
+   texte dans `paragraph.runs[0].text` et vide les autres runs. Le
+   formatting du premier run (font, gras, italique, couleur, taille,
+   alignement du paragraphe) est conservé. Compromis assumé : un
+   paragraphe avec runs mixtes (e.g. moitié bold) prend le style du
+   premier run uniformément.
+5. **`_convert_docx_to_pdf`** essaie d'abord `docx2pdf` (Word COM via
+   pywin32 sur Windows — qualité PDF maximale, 1:1 avec le DOCX), puis
+   fallback `soffice --headless --convert-to pdf` (LibreOffice). Si ni
+   l'un ni l'autre n'est dispo, RuntimeError explicite.
+6. Sauvegarde côte à côte :
+   - `{cv_output_dir}/{Company_Sanitized}/0_cv_firstname_lastname_jobtitle_company.docx`
+   - `{cv_output_dir}/{Company_Sanitized}/0_cv_firstname_lastname_jobtitle_company.pdf`
+   Le DOCX intermédiaire est conservé pour permettre une retouche manuelle
+   de l'utilisateur si Gemini misfire. `_slug` normalise via
+   `unicodedata.NFKD` + regex (`L'Oréal` → `LOreal`).
+
+Retour : `{saved_path, saved_docx_path, filename, folder, edited_count, editable_count}`.
 
 ### 3. `/fill-form` — remplissage du formulaire
 
@@ -123,7 +150,8 @@ POST /scrape-job     body: {job_url, job_html}
                      → champs offre fusionnés + {llm_used, llm_error?}
 
 POST /tailor-cv      body: {offer: {title, company, ...}}
-                     → {saved_path, filename, folder, markdown, summary_used}
+                     → {saved_path, saved_docx_path, filename, folder,
+                        edited_count, editable_count}
 
 POST /fill-form      body: {form_schema, context?}
                      → {values: {field_id: value}, cv_base64?}
@@ -184,7 +212,9 @@ Codes d'erreur :
   loggée. Créer sur https://aistudio.google.com/apikey.
 - **uvicorn `--reload`** ne watch pas `.env` : changer la clé impose un
   redémarrage complet (`dev.ps1` tue les orphelins sur 8000/5173).
-- **Tests** : un fichier par agent dans `tests/`, mocks Gemini + xhtml2pdf.
+- **Tests** : un fichier par agent dans `tests/`, mocks Gemini +
+  `_convert_docx_to_pdf` (le pipeline DOCX → PDF passe par Word COM,
+  pas testable sans Word installé).
 - **Encoding** : `dev.ps1` en ASCII pur (Windows PowerShell lit CP-1252 par
   défaut).
 - **Profil utilisateur** : `backend/data/user_profile.json` est gitignoré.

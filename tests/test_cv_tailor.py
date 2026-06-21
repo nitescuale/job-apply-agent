@@ -1,4 +1,4 @@
-"""Tests pour backend/agents/cv_tailor.py."""
+"""Tests pour backend/agents/cv_tailor.py (pipeline DOCX-template)."""
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -39,7 +39,6 @@ SAMPLE_OFFER = {
 def profile_in_tmp(tmp_path, monkeypatch):
     """Patche le PROFILE_PATH partagé avec form_filler pour pointer dans tmp_path."""
     profile_path = tmp_path / "user_profile.json"
-    # Le profil de base sera complété par chaque test selon ses besoins.
     profile_path.write_text(json.dumps(SAMPLE_PROFILE), encoding="utf-8")
     monkeypatch.setattr(form_filler, "PROFILE_PATH", profile_path)
     return profile_path
@@ -103,7 +102,7 @@ def test_resolve_output_path_missing_dir_raises(profile_in_tmp):
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# DOCX reading
+# DOCX reading (legacy helper, kept for diagnostics)
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -137,20 +136,120 @@ def test_read_base_cv_wrong_extension_raises(tmp_path):
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# strip fences + availability
+# Editable heuristic
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_strip_md_fences_removes_code_fence():
-    assert cv_tailor._strip_md_fences("```markdown\n# Title\n```") == "# Title"
-    assert cv_tailor._strip_md_fences("```md\n## H2\n```") == "## H2"
-    assert cv_tailor._strip_md_fences("```\nplain\n```") == "plain"
-    assert cv_tailor._strip_md_fences("# Already clean") == "# Already clean"
+def test_is_editable_accepts_substantive_bullets():
+    bullet = (
+        "Built and automated end-to-end data pipelines (PostgreSQL, REST APIs, "
+        "Pandas, Polars) processing 100M+ records daily"
+    )
+    assert cv_tailor._is_editable(bullet) is True
+
+
+def test_is_editable_rejects_short_text():
+    assert cv_tailor._is_editable("Alex Nitescu") is False
+    assert cv_tailor._is_editable("CDI") is False
+    assert cv_tailor._is_editable("") is False
+
+
+def test_is_editable_rejects_all_caps_section_headers():
+    assert cv_tailor._is_editable("EXPERIENCE") is False
+    assert cv_tailor._is_editable("ADDITIONAL INFORMATION") is False
+
+
+def test_is_editable_rejects_tab_separated_layout_lines():
+    # Company tab Location and Title tab Date are layout, not content
+    assert cv_tailor._is_editable("Exponens\tParis, France") is False
+    assert cv_tailor._is_editable("Data Analyst Apprentice\tSeptember 2023 – Present") is False
+
+
+def test_is_editable_rejects_contact_lines():
+    assert cv_tailor._is_editable("Paris, France – +33 781830598 – nitescu.alex04@gmail.com") is False
+    assert cv_tailor._is_editable("https://github.com/nitescuale and https://linkedin.com/in/x") is False
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Paragraph walking + run-preserving replacement
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_collect_paragraphs_walks_body_and_tables(tmp_path):
+    from docx import Document
+
+    doc = Document()
+    doc.add_paragraph("Body para A")
+    doc.add_paragraph("Body para B")
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Cell L"
+    table.cell(0, 1).text = "Cell R"
+
+    paragraphs = cv_tailor._collect_paragraphs(doc)
+    texts = [p.text for p in paragraphs]
+    assert "Body para A" in texts
+    assert "Body para B" in texts
+    assert "Cell L" in texts
+    assert "Cell R" in texts
+
+
+def test_set_paragraph_text_keeps_first_run_formatting(tmp_path):
+    from docx import Document
+
+    doc = Document()
+    p = doc.add_paragraph()
+    r = p.add_run("Original bold text")
+    r.bold = True
+    p.add_run(" plain trailing")
+
+    cv_tailor._set_paragraph_text(p, "Tailored replacement content")
+
+    # First run carries the new text and keeps its bold styling
+    assert p.runs[0].text == "Tailored replacement content"
+    assert p.runs[0].bold is True
+    # Other runs were emptied
+    assert all(r.text == "" for r in p.runs[1:])
+    # The visible paragraph text is the new content only
+    assert p.text == "Tailored replacement content"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _parse_edits
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_parse_edits_handles_json_object():
+    edits = cv_tailor._parse_edits('{"0": "new 0", "3": "new 3"}')
+    assert edits == {0: "new 0", 3: "new 3"}
+
+
+def test_parse_edits_strips_code_fence():
+    raw = '```json\n{"5": "tailored bullet"}\n```'
+    assert cv_tailor._parse_edits(raw) == {5: "tailored bullet"}
+
+
+def test_parse_edits_handles_empty_response():
+    assert cv_tailor._parse_edits("") == {}
+    assert cv_tailor._parse_edits("   \n  ") == {}
+
+
+def test_parse_edits_raises_on_invalid_json():
+    with pytest.raises(RuntimeError, match="JSON invalide"):
+        cv_tailor._parse_edits("not a json")
+
+
+def test_parse_edits_skips_non_integer_keys():
+    edits = cv_tailor._parse_edits('{"2": "ok", "title": "should be ignored"}')
+    assert edits == {2: "ok"}
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Availability
+# ──────────────────────────────────────────────────────────────────────────
 
 
 def test_is_available_requires_key_profile_and_paths(profile_in_tmp, monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "fake")
-    # base_cv_path et cv_output_dir vides → False
     assert cv_tailor.is_available() is False
 
     write_profile(profile_in_tmp, base_cv_path="/tmp/x.docx", cv_output_dir="/tmp/CVs")
@@ -161,51 +260,71 @@ def test_is_available_requires_key_profile_and_paths(profile_in_tmp, monkeypatch
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Orchestration (mocked Gemini + mocked WeasyPrint)
+# Orchestrator (mocked Gemini + mocked PDF conversion)
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_tailor_cv_orchestrates_end_to_end(tmp_path, profile_in_tmp, monkeypatch):
-    # Prépare un DOCX source
+def _make_docx_with_editable_bullets(path: Path) -> None:
     from docx import Document
 
-    docx_path = tmp_path / "base.docx"
     doc = Document()
-    doc.add_paragraph("Alex Nitescu — Data Scientist")
-    doc.add_paragraph("Experience: 3 years in ML pipelines")
-    doc.save(str(docx_path))
+    doc.add_paragraph("Alex Nitescu")  # short — not editable
+    doc.add_paragraph("EXPERIENCE")  # all caps — not editable
+    doc.add_paragraph(
+        "Built and automated end-to-end data pipelines (PostgreSQL, REST APIs, "
+        "Pandas, Polars) processing 100M+ records daily"
+    )  # editable
+    doc.add_paragraph(
+        "Designed dynamic Power BI dashboards consumed by 5+ business teams "
+        "across the firm"
+    )  # editable
+    doc.save(str(path))
+
+
+def test_tailor_cv_orchestrates_end_to_end(tmp_path, profile_in_tmp, monkeypatch):
+    docx_path = tmp_path / "base.docx"
+    _make_docx_with_editable_bullets(docx_path)
 
     out_dir = tmp_path / "CVs"
-    write_profile(
-        profile_in_tmp,
-        base_cv_path=str(docx_path),
-        cv_output_dir=str(out_dir),
-        include_summary=False,  # legacy orchestration check — summary covered in dedicated tests
-    )
+    write_profile(profile_in_tmp, base_cv_path=str(docx_path), cv_output_dir=str(out_dir))
     monkeypatch.setenv("GEMINI_API_KEY", "fake")
 
-    fake_md = "# Alex Nitescu\nalex@example.com\n\n## Summary\nGreat fit."
+    # Gemini "tailored" the two editable bullets at indices 2 and 3
+    fake_json = json.dumps({
+        "2": "Engineered scalable Python data pipelines processing 100M+ daily records with Spark and AWS",
+        "3": "Built BI dashboards consumed by 5+ teams to track revenue and cost optimization KPIs",
+    })
 
-    with patch.object(cv_tailor, "_call_gemini", return_value=fake_md) as llm_mock, patch.object(
-        cv_tailor, "render_pdf"
+    with patch.object(cv_tailor, "_call_gemini", return_value=fake_json) as llm_mock, patch.object(
+        cv_tailor, "_convert_docx_to_pdf"
     ) as pdf_mock:
-        pdf_mock.side_effect = lambda md, path: (path.parent.mkdir(parents=True, exist_ok=True), path.write_bytes(b"%PDF-fake"))[-1] or path
+        pdf_mock.side_effect = lambda src, dst: dst.write_bytes(b"%PDF-fake")
         result = cv_tailor.tailor_cv(SAMPLE_OFFER)
 
+    # LLM call carried the editable paragraphs and the offer
     assert llm_mock.called
     sent_prompt = llm_mock.call_args[0][0]
     assert "BNP Paribas" in sent_prompt
-    assert "Alex Nitescu" in sent_prompt
+    assert "Built and automated end-to-end data pipelines" in sent_prompt  # original text
+    assert "EXPERIENCE" not in sent_prompt.split("EDITABLE_PARAGRAPHS")[1]  # header excluded
 
+    # PDF conversion called with our generated DOCX + target PDF
     pdf_mock.assert_called_once()
+    src_arg, dst_arg = pdf_mock.call_args[0]
+    assert src_arg.suffix == ".docx"
+    assert dst_arg.suffix == ".pdf"
+
+    # Result metadata
     assert result["filename"].endswith(".pdf")
     assert "BNP_Paribas" in result["folder"]
-    assert result["markdown"] == fake_md
+    assert result["editable_count"] == 2
+    assert result["edited_count"] == 2
+    assert Path(result["saved_docx_path"]).suffix == ".docx"
 
 
 def test_tailor_cv_requires_base_cv_path(tmp_path, profile_in_tmp, monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "fake")
-    write_profile(profile_in_tmp, cv_output_dir=str(tmp_path / "CVs"))  # pas de base_cv_path
+    write_profile(profile_in_tmp, cv_output_dir=str(tmp_path / "CVs"))
     with pytest.raises(ValueError, match="base_cv_path"):
         cv_tailor.tailor_cv(SAMPLE_OFFER)
 
@@ -216,12 +335,15 @@ def test_tailor_cv_requires_api_key(profile_in_tmp, monkeypatch):
         cv_tailor.tailor_cv(SAMPLE_OFFER)
 
 
-def test_tailor_cv_empty_llm_response_raises(tmp_path, profile_in_tmp, monkeypatch):
+def test_tailor_cv_raises_when_no_editable_paragraphs(tmp_path, profile_in_tmp, monkeypatch):
+    """DOCX qui ne contient que des en-têtes / contact / dates → rien à éditer."""
     from docx import Document
 
     docx_path = tmp_path / "base.docx"
     doc = Document()
-    doc.add_paragraph("Some content")
+    doc.add_paragraph("Alex Nitescu")
+    doc.add_paragraph("EXPERIENCE")
+    doc.add_paragraph("alex@example.com")
     doc.save(str(docx_path))
 
     write_profile(
@@ -231,216 +353,68 @@ def test_tailor_cv_empty_llm_response_raises(tmp_path, profile_in_tmp, monkeypat
     )
     monkeypatch.setenv("GEMINI_API_KEY", "fake")
 
-    with patch.object(cv_tailor, "_call_gemini", return_value="   "):
-        with pytest.raises(RuntimeError, match="vide"):
-            cv_tailor.tailor_cv(SAMPLE_OFFER)
+    with pytest.raises(ValueError, match="éditable"):
+        cv_tailor.tailor_cv(SAMPLE_OFFER)
 
 
-# ──────────────────────────────────────────────────────────────────────────
-# Summary generation (new)
-# ──────────────────────────────────────────────────────────────────────────
+def test_tailor_cv_tolerates_empty_edits_dict(tmp_path, profile_in_tmp, monkeypatch):
+    """Si Gemini renvoie {} (rien à changer), le pipeline ne crashe pas — il
+    sauvegarde une copie identique du DOCX et la convertit."""
+    docx_path = tmp_path / "base.docx"
+    _make_docx_with_editable_bullets(docx_path)
 
-
-VALID_SUMMARY = (
-    "Data Scientist with 3 years building Python ML pipelines on AWS, including "
-    "FastAPI services in production at a previous fintech role. Comfortable "
-    "with Spark workloads and infrastructure cost optimization, both keywords "
-    "from this BNP Paribas Senior Data Engineer brief."
-)
-
-
-def test_generate_summary_returns_clean_text(profile_in_tmp, monkeypatch):
+    write_profile(
+        profile_in_tmp,
+        base_cv_path=str(docx_path),
+        cv_output_dir=str(tmp_path / "CVs"),
+    )
     monkeypatch.setenv("GEMINI_API_KEY", "fake")
-    with patch.object(cv_tailor, "_call_gemini", return_value=VALID_SUMMARY) as mock:
-        out = cv_tailor.generate_summary(SAMPLE_OFFER, SAMPLE_PROFILE, "base cv content")
-    assert mock.called
-    assert out == VALID_SUMMARY
+
+    with patch.object(cv_tailor, "_call_gemini", return_value="{}"), patch.object(
+        cv_tailor, "_convert_docx_to_pdf"
+    ) as pdf_mock:
+        pdf_mock.side_effect = lambda src, dst: dst.write_bytes(b"%PDF-fake")
+        result = cv_tailor.tailor_cv(SAMPLE_OFFER)
+
+    assert result["edited_count"] == 0
+    assert result["editable_count"] == 2
 
 
-def test_generate_summary_strips_quotes_and_fences(profile_in_tmp, monkeypatch):
+def test_tailor_cv_ignores_indices_outside_editable_set(
+    tmp_path, profile_in_tmp, monkeypatch
+):
+    """Si Gemini hallucine un index hors de la liste editable, on l'ignore
+    proprement sans toucher au paragraphe inattendu."""
+    docx_path = tmp_path / "base.docx"
+    _make_docx_with_editable_bullets(docx_path)
+
+    write_profile(
+        profile_in_tmp,
+        base_cv_path=str(docx_path),
+        cv_output_dir=str(tmp_path / "CVs"),
+    )
     monkeypatch.setenv("GEMINI_API_KEY", "fake")
-    cases = [
-        f'"{VALID_SUMMARY}"',
-        f"'{VALID_SUMMARY}'",
-        f"```\n{VALID_SUMMARY}\n```",
-        f"Summary: {VALID_SUMMARY}",
-        f"## Summary\n{VALID_SUMMARY}",
-    ]
-    for raw in cases:
-        with patch.object(cv_tailor, "_call_gemini", return_value=raw):
-            out = cv_tailor.generate_summary(SAMPLE_OFFER, SAMPLE_PROFILE)
-        assert out == VALID_SUMMARY, f"unexpected output for input {raw!r}: {out!r}"
 
+    # index 0 ("Alex Nitescu") and 1 ("EXPERIENCE") are NOT in the editable list
+    rogue = json.dumps({"0": "Hacked Name", "1": "Hacked Section", "2": "Tailored bullet"})
 
-def test_generate_summary_returns_none_on_empty(profile_in_tmp, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "fake")
-    for empty in ("", "   ", "\n\n"):
-        with patch.object(cv_tailor, "_call_gemini", return_value=empty):
-            assert cv_tailor.generate_summary(SAMPLE_OFFER, SAMPLE_PROFILE) is None
+    with patch.object(cv_tailor, "_call_gemini", return_value=rogue), patch.object(
+        cv_tailor, "_convert_docx_to_pdf"
+    ) as pdf_mock:
+        pdf_mock.side_effect = lambda src, dst: dst.write_bytes(b"%PDF-fake")
+        result = cv_tailor.tailor_cv(SAMPLE_OFFER)
 
+    # Only the valid editable index (2) was applied
+    assert result["edited_count"] == 1
 
-def test_generate_summary_returns_none_on_too_short(profile_in_tmp, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "fake")
-    with patch.object(cv_tailor, "_call_gemini", return_value="too short"):
-        assert cv_tailor.generate_summary(SAMPLE_OFFER, SAMPLE_PROFILE) is None
-
-
-def test_generate_summary_returns_none_when_llm_raises(profile_in_tmp, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "fake")
-    with patch.object(cv_tailor, "_call_gemini", side_effect=RuntimeError("429 quota")):
-        assert cv_tailor.generate_summary(SAMPLE_OFFER, SAMPLE_PROFILE) is None
-
-
-def test_generate_summary_returns_none_without_api_key(profile_in_tmp, monkeypatch):
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    with patch.object(cv_tailor, "_call_gemini") as mock:
-        assert cv_tailor.generate_summary(SAMPLE_OFFER, SAMPLE_PROFILE) is None
-    # Must short-circuit before the network call
-    mock.assert_not_called()
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# _inject_summary
-# ──────────────────────────────────────────────────────────────────────────
-
-
-def test_inject_summary_inserts_before_first_h2():
-    md = "# Name\nemail · phone\n\n## Experience\n### Role\n- did things\n"
-    out = cv_tailor._inject_summary(md, VALID_SUMMARY)
-    assert "## SUMMARY" in out
-    assert out.index("## SUMMARY") < out.index("## Experience")
-
-
-def test_inject_summary_appends_when_no_h2():
-    md = "# Name\nemail · phone\n"
-    out = cv_tailor._inject_summary(md, VALID_SUMMARY)
-    assert "## SUMMARY" in out
-    assert out.rstrip().endswith(VALID_SUMMARY)
-
-
-def test_inject_summary_noop_on_empty_summary():
-    md = "# Name\n\n## Experience\n- x\n"
-    assert cv_tailor._inject_summary(md, "") == md
-    assert cv_tailor._inject_summary(md, "   ".strip()) == md
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# tailor_cv integration with summary toggle
-# ──────────────────────────────────────────────────────────────────────────
-
-
-def _make_docx(tmp_path: Path, content: str = "Alex Nitescu — Data Scientist") -> Path:
+    # Re-open the saved DOCX and confirm the protected paragraphs are intact
     from docx import Document
 
-    p = tmp_path / "base.docx"
-    doc = Document()
-    for line in content.split("\n"):
-        doc.add_paragraph(line)
-    doc.save(str(p))
-    return p
-
-
-def test_tailor_cv_includes_summary_when_enabled(tmp_path, profile_in_tmp, monkeypatch):
-    docx_path = _make_docx(tmp_path)
-    write_profile(
-        profile_in_tmp,
-        base_cv_path=str(docx_path),
-        cv_output_dir=str(tmp_path / "CVs"),
-        include_summary=True,
-    )
-    monkeypatch.setenv("GEMINI_API_KEY", "fake")
-
-    main_cv = "# Alex Nitescu\nalex@example.com\n\n## Experience\n- something\n"
-    # First call = summary, second call = main CV
-    with patch.object(
-        cv_tailor, "_call_gemini", side_effect=[VALID_SUMMARY, main_cv]
-    ) as mock, patch.object(cv_tailor, "render_pdf"):
-        result = cv_tailor.tailor_cv(SAMPLE_OFFER)
-
-    assert mock.call_count == 2
-    assert result["summary_used"] is True
-    assert "## SUMMARY" in result["markdown"]
-    assert VALID_SUMMARY in result["markdown"]
-    # SUMMARY must come before Experience
-    assert result["markdown"].index("## SUMMARY") < result["markdown"].index("## Experience")
-
-
-def test_tailor_cv_skips_summary_when_disabled(tmp_path, profile_in_tmp, monkeypatch):
-    docx_path = _make_docx(tmp_path)
-    write_profile(
-        profile_in_tmp,
-        base_cv_path=str(docx_path),
-        cv_output_dir=str(tmp_path / "CVs"),
-        include_summary=False,
-    )
-    monkeypatch.setenv("GEMINI_API_KEY", "fake")
-
-    main_cv = "# Alex Nitescu\nalex@example.com\n\n## Experience\n- something\n"
-    with patch.object(cv_tailor, "_call_gemini", side_effect=[main_cv]) as mock, patch.object(
-        cv_tailor, "render_pdf"
-    ):
-        result = cv_tailor.tailor_cv(SAMPLE_OFFER)
-
-    # Only ONE LLM call (the main CV); summary step is skipped entirely
-    assert mock.call_count == 1
-    assert result["summary_used"] is False
-    assert "## SUMMARY" not in result["markdown"]
-
-
-def test_tailor_cv_skips_summary_silently_on_llm_error(tmp_path, profile_in_tmp, monkeypatch):
-    docx_path = _make_docx(tmp_path)
-    write_profile(
-        profile_in_tmp,
-        base_cv_path=str(docx_path),
-        cv_output_dir=str(tmp_path / "CVs"),
-        include_summary=True,
-    )
-    monkeypatch.setenv("GEMINI_API_KEY", "fake")
-
-    main_cv = "# Alex Nitescu\nalex@example.com\n\n## Experience\n- something\n"
-    # Summary call raises, main CV call succeeds. tailor_cv must NOT raise.
-    with patch.object(
-        cv_tailor,
-        "_call_gemini",
-        side_effect=[RuntimeError("429 quota"), main_cv],
-    ), patch.object(cv_tailor, "render_pdf"):
-        result = cv_tailor.tailor_cv(SAMPLE_OFFER)
-
-    assert result["summary_used"] is False
-    assert "## SUMMARY" not in result["markdown"]
-    # Main CV is still there
-    assert "## Experience" in result["markdown"]
-
-
-def test_tailor_cv_output_contains_no_banned_cliches(tmp_path, profile_in_tmp, monkeypatch):
-    """Sampled path: with clean mocked outputs, none of the banned clichés
-    must appear in the final Markdown. Documents the constraint and guards
-    against the test fixtures themselves drifting into clichéd phrasing."""
-    docx_path = _make_docx(tmp_path)
-    write_profile(
-        profile_in_tmp,
-        base_cv_path=str(docx_path),
-        cv_output_dir=str(tmp_path / "CVs"),
-        include_summary=True,
-    )
-    monkeypatch.setenv("GEMINI_API_KEY", "fake")
-
-    clean_main_cv = (
-        "# Alex Nitescu\nalex@example.com\n\n"
-        "## Experience\n### Data Scientist · ACME\n*2023-2026 · Paris*\n"
-        "- Built ML pipelines on AWS using Python and FastAPI.\n"
-        "- Optimized Spark job costs by 30%.\n\n"
-        "## Skills\nPython, FastAPI, AWS, Spark\n"
-    )
-
-    with patch.object(
-        cv_tailor, "_call_gemini", side_effect=[VALID_SUMMARY, clean_main_cv]
-    ), patch.object(cv_tailor, "render_pdf"):
-        result = cv_tailor.tailor_cv(SAMPLE_OFFER)
-
-    lowered = result["markdown"].lower()
-    for phrase in cv_tailor.BANNED_CLICHES:
-        assert phrase not in lowered, f"banned cliché leaked into output: {phrase!r}"
+    saved = Document(result["saved_docx_path"])
+    texts = [p.text for p in saved.paragraphs]
+    assert "Alex Nitescu" in texts
+    assert "EXPERIENCE" in texts
+    assert any("Tailored bullet" in t for t in texts)
 
 
 def test_banned_cliches_constant_is_non_empty():

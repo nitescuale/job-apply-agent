@@ -18,7 +18,9 @@ in English.
 - **Extension** — React 18 + TypeScript, Vite 5 + `@crxjs/vite-plugin` (Manifest V3)
 - **Backend** — Python 3.11+, FastAPI, uvicorn, [Scrapling](https://github.com/D4Vinci/Scrapling) (HTML parser)
 - **LLM** — Google Gemini (`google-genai`), `gemini-2.5-flash`, free tier
-- **CV pipeline** — `python-docx` (DOCX input) + `markdown` + `weasyprint` (Markdown → PDF)
+- **CV pipeline** — `python-docx` edits the source DOCX in place (text of
+  the runs is replaced, formatting/styles preserved), then `docx2pdf`
+  (Word COM) converts to PDF — LibreOffice headless as a fallback
 - **Design** — "Atelier" light, Hanken Grotesk + Spline Sans Mono, single green accent (`#3d7d5a`)
 
 ## Architecture
@@ -35,7 +37,7 @@ job-apply-agent/
 │   │   ├── job_scraper.py           Scrapling: JSON-LD → meta → text fallback
 │   │   ├── llm_extractor.py         Gemini: filters noise, structures essentials
 │   │   ├── form_filler.py           Gemini: maps form_schema + profile → values
-│   │   └── cv_tailor.py             Gemini + xhtml2pdf: DOCX base → tailored PDF
+│   │   └── cv_tailor.py             python-docx in-place edits + docx2pdf → PDF
 │   └── data/
 │       ├── user_profile.example.json
 │       └── user_profile.json        (gitignored, your real profile)
@@ -82,33 +84,50 @@ Content script FILL_FORM: React-safe native value setter, DataTransfer
 
 ### 3. CV tailoring — `POST /tailor-cv`
 
+The core idea: don't reinvent the layout. Take the user's existing DOCX,
+identify which paragraphs are content (vs layout/headers/contact lines),
+have Gemini rewrite just those texts, and convert the modified DOCX to
+PDF via Word so the visual result is 1:1 with the source.
+
 ```
-profile.base_cv_path (DOCX) → python-docx extracts text
+profile.base_cv_path (DOCX) → python-docx loads the document
         ↓
-(optional, profile.include_summary = true by default)
-Gemini #1: writes a 2-3 sentence SUMMARY with hard rules — only facts
-        from profile / base CV, 2-4 mirrored offer keywords, no banned
-        clichés ("passionate", "team player", "fast learner", ...),
-        no career-goal language that could disqualify for the role.
-        Failure / empty output → no summary section, no crash.
+_collect_paragraphs walks top-level paragraphs + table cells in
+        reading order (each paragraph gets a sequential index).
         ↓
-Gemini #2: receives base CV text + offer essentials + profile facts,
-        returns an English Markdown CV that mirrors offer keywords
-        for ATS, reorders bullets, never fabricates dates/titles,
-        targets one page (~600 words). Summary section is NOT written
-        by this pass — it is prepended from the first call.
+_is_editable filters substantive content: length ≥ 25 chars, no
+        tab characters (skips company\tlocation lines), not pure
+        uppercase (skips EXPERIENCE-style section headers), no
+        @ or contact patterns (skips email/phone/URL lines).
         ↓
-markdown → HTML → xhtml2pdf → PDF (A4, Helvetica 10.5pt,
-        uppercase letter-spaced sections, single column)
+Gemini: receives {idx: text} for each editable paragraph + the
+        offer essentials + the profile, returns a strict JSON
+        {idx: rewritten_text}. Each value stays within ±25 % of
+        the original length, mirrors offer keywords when truthful,
+        and never invents employers/dates/metrics. Banned clichés
+        (passionate, team player, fast learner, ...) are blocked
+        in the prompt.
         ↓
-Saved to {cv_output_dir}/{Company_Sanitized}/
-         0_cv_firstname_lastname_jobtitle_company.pdf
+_set_paragraph_text: for each edited index, writes the new text
+        into paragraph.runs[0].text and empties the other runs.
+        The first run's formatting (font, bold, italic, colour,
+        size) and the paragraph-level alignment/indent are kept.
+        ↓
+doc.save() → tailored DOCX
+        ↓
+_convert_docx_to_pdf: tries docx2pdf (Word COM, 1:1 fidelity to
+        the DOCX) then falls back to soffice --headless if Word
+        is unavailable.
+        ↓
+Saved side by side in {cv_output_dir}/{Company_Sanitized}/:
+  0_cv_firstname_lastname_jobtitle_company.docx
+  0_cv_firstname_lastname_jobtitle_company.pdf
 ```
 
 The popup's "Adapter le CV" button triggers this and opens the resulting
-PDF in a new Chrome tab via `file://`. The response includes a
-`summary_used: bool` flag so callers can tell whether the SUMMARY pass
-ran successfully.
+PDF in a new Chrome tab via `file://`. The response carries
+`edited_count` / `editable_count` so callers can see how many paragraphs
+Gemini actually touched.
 
 ## Quick start
 
@@ -215,7 +234,7 @@ open `file://` URLs so the generated PDF can preview in a new tab.
 | GET    | `/health`      | `{status, llm_available, form_filler_available, cv_tailor_available}`    |
 | POST   | `/scrape-job`  | Body: `{job_url, job_html}` → structured fields                          |
 | POST   | `/fill-form`   | Body: `{form_schema, context}` → `{values, cv_base64}`                   |
-| POST   | `/tailor-cv`   | Body: `{offer}` → `{saved_path, filename, folder, markdown, summary_used}` |
+| POST   | `/tailor-cv`   | Body: `{offer}` → `{saved_path, saved_docx_path, filename, folder, edited_count, editable_count}` |
 
 ## Tests
 
@@ -227,12 +246,11 @@ pytest -q
 - `test_job_scraper.py` — JSON-LD, Open Graph meta, fallback, double-encoded HTML entities
 - `test_llm_extractor.py` — mocked Gemini, malformed JSON, markdown fences
 - `test_form_filler.py` — profile loading, mocked mapping, base64 CV reader
-- `test_cv_tailor.py` — slug normalisation, filename convention, DOCX parsing
-  (paragraphs + tables), output path resolution, full orchestration with
-  mocked Gemini + mocked PDF rendering, error paths, summary generation
-  (cleaning, quote/fence stripping, empty/short/error fallback, no-API-key
-  short-circuit), `_inject_summary` placement, `include_summary` toggle,
-  banned-cliché audit on a sampled output path
+- `test_cv_tailor.py` — slug normalisation, filename convention,
+  DOCX walking + run-level text replacement (formatting preserved),
+  `_is_editable` heuristic, `_parse_edits` (JSON, fences, garbage),
+  full orchestration with mocked Gemini + mocked PDF conversion,
+  protection against rogue indices, `BANNED_CLICHES` constant audit
 
 ## Supported sites
 

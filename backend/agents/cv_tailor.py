@@ -1,18 +1,37 @@
-"""CV tailor — adapte un CV de base (DOCX) à une offre via Gemini, rend en PDF.
+"""CV tailor — adapte le CV DOCX de base à une offre EN PRÉSERVANT sa forme.
+
+Différence majeure avec une approche Markdown -> PDF : on n'invente PAS de
+mise en page. Le DOCX de l'utilisateur est ouvert, on identifie les
+paragraphes "éditables" (descriptions longues, bullets de réalisations,
+summary), on demande à Gemini une version tailorée de leur texte, et on
+réécrit le contenu textuel des runs en gardant le formatting (font, gras,
+italique, alignement, espacement) tel qu'il est dans le DOCX. Le résultat
+est un nouveau DOCX visuellement identique à l'original, sauf que les
+bullets sont reformulés pour mirrorer l'offre. On convertit ensuite ce
+DOCX en PDF via docx2pdf (Microsoft Word COM) ou LibreOffice headless en
+fallback.
 
 Pipeline :
-    1. Lit le DOCX référencé par profile.base_cv_path → texte brut.
-    2. Demande à Gemini de réécrire le CV en Markdown anglais, orienté ATS,
-       en miroitant les mots-clés de l'offre sans inventer de faits.
-    3. Convertit le Markdown → HTML → PDF (xhtml2pdf, pure Python — pas de
-       dépendance GTK/Pango sous Windows comme avec WeasyPrint).
-    4. Sauvegarde dans {cv_output_dir}/{Company_Sanitized}/0_cv_*.pdf
+    1. Charge profile.base_cv_path avec python-docx.
+    2. Walk paragraphes top-level + paragraphes dans les cellules de table.
+    3. Heuristique _is_editable filtre : assez long, pas de tab,
+       pas en MAJUSCULES seules, pas d'info contact (email, téléphone, URL).
+    4. Gemini reçoit (indices, texte original, offre, profil) → renvoie
+       un JSON {idx: nouveau_texte}. On respecte la taille (±25%) et la
+       structure (pas d'ajout/suppression de paragraphes).
+    5. Pour chaque édition, on réécrit le run[0] et on vide les autres
+       runs du paragraphe → formatting préservé, texte changé.
+    6. Sauvegarde DOCX + conversion PDF dans
+       {cv_output_dir}/{Company}/0_cv_*.{docx,pdf}.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
+import shutil
+import subprocess
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -22,11 +41,9 @@ from .form_filler import load_profile
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gemini-2.5-flash"
-MAX_BASE_CV_CHARS = 18000
-SUMMARY_MIN_LENGTH = 30
 
-# Banned cliché phrases — kept as a module constant so tests can import and
-# enforce. Case-insensitive substring match.
+# Clichés bannis dans le prompt. Conservés comme constante pour que les
+# tests puissent vérifier qu'ils sont absents d'une sortie type.
 BANNED_CLICHES: tuple[str, ...] = (
     "passionate",
     "driven",
@@ -42,94 +59,46 @@ BANNED_CLICHES: tuple[str, ...] = (
     "self motivated",
 )
 
-_SYSTEM = """You are a senior CV tailoring expert. You receive:
-1. A base CV (free-form text extracted from a DOCX) — the candidate's full history.
-2. A job offer with extracted essentials (title, company, required skills, missions, etc.).
-3. A structured profile with contact details and facts.
+_SYSTEM = """You tailor a candidate's CV to a specific job offer by REWRITING
+SPECIFIC TEXT PARAGRAPHS, preserving the candidate's exact CV layout.
 
-Generate a tailored CV in **English Markdown** with a STRICT structure designed
-for a clean two-column layout (left = content, right = date/location). Use the
-EXACT '||' separator (two pipes) to mark left/right splits.
+You receive:
+  - The job OFFER (title, company, required skills, missions, ...).
+  - The candidate's structured PROFILE (contact, languages, etc.).
+  - A numbered list of EDITABLE_PARAGRAPHS from the candidate's DOCX. Each
+    entry is "{idx}: {original text}". These are the substantive paragraphs
+    (summary, bullets, project descriptions). Other paragraphs (name,
+    section headers, dates, locations, contact info) have ALREADY been
+    excluded — never reference them, never produce keys for them.
 
-# {Full Name}
-{Tagline — one short line, e.g. "2026 Data Scientist / AI&ML Engineer Graduate"}
-{Contact line, ONE line: City, Country — Phone — Email — github.com/handle — linkedin.com/in/handle}
+For each paragraph, decide whether to rewrite or keep it:
+  - Rewrite ONLY when you can make the bullet more relevant to the offer
+    while staying strictly factual (use only facts contained in the
+    original paragraph, the PROFILE, or the OFFER as keywords).
+  - Stay within ±25 % of the original character count.
+  - Keep one paragraph per index — DO NOT merge, split, add or remove
+    bullets.
+  - Use English action verbs. Mirror offer keywords when truthful.
+  - NEVER invent metrics, employers, titles, technologies, or dates that
+    are not in the original paragraph.
 
-## EXPERIENCE
+NEVER use these clichés (even once): passionate, driven, hard-working,
+team player, fast learner, hit the ground running, always on the
+lookout, results-oriented, self-motivated.
 
-### {Company} || {Location}
-{Optional one-line company description, plain prose}
-**{Job Title}** || *{Date range}*
-- {Action-verb achievement, mirrors offer keywords, never invents}
-- {Another bullet}
-
-(repeat the block above per job)
-
-## PROJECTS
-
-### {Project name}
-{One sentence describing what it is and the stack}
-- {Bullet}
-- {Bullet}
-
-## EDUCATION
-
-### {School} || {Location}
-**{Program / Degree}** || *{Year range}*
-{Optional one-line list of relevant coursework}
-
-## SKILLS
-{Comma-separated, offer-relevant skills first, grouped if natural}
-
-## LANGUAGES
-- {Language}: {Level}
-
-Hard rules:
-- Output English Markdown ONLY. No fences, no preamble.
-- The '||' MUST appear exactly once per header line (no spaces around them
-  matter, the parser trims). If a line has no right-hand value, OMIT the line.
-- Do NOT invent dates, titles, employers, or achievements absent from the
-  base CV / profile.
-- Do NOT add a "Summary", "Profile" or "Objective" section — a separate pass
-  prepends the SUMMARY.
-- Target one page (~600 words). Action verbs, no clichés."""
-
-
-_SUMMARY_SYSTEM = """You write the top-of-CV professional summary that appears
-above Experience on a one-page tailored CV.
-
-Output ONLY the summary text. 2 to 3 sentences. Plain prose, no preamble,
-no markdown, no quotes, no bullets, no header.
-
-HARD RULES:
-- Every sentence must reference a concrete, verifiable fact taken from PROFILE
-  or BASE_CV (a technology, a metric, a project, an experience, a year, a
-  school). Never invent metrics, employers, titles, technologies or dates.
-- Mirror 2-4 keywords from the OFFER (job title and required skills) — only
-  those genuinely supported by PROFILE/BASE_CV. Never claim a skill the
-  candidate does not have.
-- Open with positioning aligned to the offer's job title.
-- Language: English only.
-
-BANNED PHRASES (never use, even once): "passionate", "driven", "hard-working",
-"team player", "fast learner", "hit the ground running", "always on the
-lookout", "results-oriented", "self-motivated".
-
-NEVER state ambitions that could disqualify the candidate for THIS offer:
-- No "looking to move into management" on an IC role.
-- No "transitioning into research" on an applied role.
-- If you mention a goal, derive it from the offer itself.
-
-Output: 2 to 3 sentences of prose. Nothing else."""
+Output a STRICT JSON object. Keys are paragraph indices (as strings).
+Values are the rewritten text. Omit a key if you choose to keep that
+paragraph verbatim. No fences, no preamble — JSON only."""
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Availability + DOCX reading
+# Availability + paths
 # ──────────────────────────────────────────────────────────────────────────
 
 
 def is_available() -> bool:
-    """Vrai si la clé Gemini et le profil sont configurés."""
+    """Vrai si la clé Gemini et le profil (avec base_cv_path + cv_output_dir)
+    sont configurés."""
     if not os.getenv("GEMINI_API_KEY"):
         return False
     try:
@@ -140,7 +109,12 @@ def is_available() -> bool:
 
 
 def read_base_cv(path: str | Path) -> str:
-    """Extrait le texte d'un DOCX. Tolère .docx uniquement (pas .doc legacy)."""
+    """Extrait le texte brut d'un DOCX (paragraphes + cellules de table).
+
+    Conservé pour diagnostics / tests. Le pipeline de tailoring n'utilise plus
+    cette fonction — il manipule directement l'objet Document pour pouvoir
+    préserver le formatting des runs lors du remplacement.
+    """
     p = Path(path).expanduser()
     if not p.is_file():
         raise FileNotFoundError(f"base_cv_path introuvable: {p}")
@@ -155,7 +129,6 @@ def read_base_cv(path: str | Path) -> str:
         text = para.text.strip()
         if text:
             parts.append(text)
-    # Tableaux (parfois utilisés pour les sections du CV)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
@@ -166,17 +139,12 @@ def read_base_cv(path: str | Path) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Sanitization + paths
+# Sanitization + filename convention
 # ──────────────────────────────────────────────────────────────────────────
 
 
 def _slug(s: str | None, *, allow_caps: bool = False) -> str:
-    """Normalise une chaîne pour un nom de fichier/dossier ASCII.
-
-    - décompose les accents (é -> e)
-    - remplace espaces et séparateurs par _
-    - retire le reste hors [a-zA-Z0-9_]
-    """
+    """Normalise une chaîne pour un nom de fichier/dossier ASCII."""
     if not s:
         return ""
     text = unicodedata.normalize("NFKD", s)
@@ -211,20 +179,86 @@ def resolve_output_path(profile: dict[str, Any], offer: dict[str, Any]) -> Path:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# LLM call
+# DOCX walking + editable heuristic
+# ──────────────────────────────────────────────────────────────────────────
+
+_CONTACT_RE = re.compile(
+    r"(\+\d{2,3}\s*\d|https?://|linkedin\.|github\.|\.com\b|\.fr\b|\bphone\b|\btel\b)",
+    re.IGNORECASE,
+)
+
+
+def _is_editable(text: str) -> bool:
+    """Heuristique : un paragraphe est éditable s'il contient du contenu
+    substantiel (un bullet de réalisation, le summary, une description de
+    projet) plutôt que de la mise en page (entête de section, ligne de
+    contact, ligne tab-séparée company/location).
+
+    Règles cumulatives — toutes doivent être vraies :
+      - longueur ≥ 25 caractères (filtre les section headers, noms, dates)
+      - pas de tabulation (filtre les lignes alignées droite tab-séparées)
+      - pas en MAJUSCULES seules (filtre EXPERIENCE, EDUCATION, ...)
+      - pas d'@ (filtre les emails)
+      - pas de pattern contact (téléphone, URL, github/linkedin)
+    """
+    s = text.strip()
+    if len(s) < 25:
+        return False
+    if "\t" in s:
+        return False
+    # Tous-caps seuls (ignorant ponctuation) → en-tête de section
+    letters = re.sub(r"[^A-Za-z]", "", s)
+    if letters and letters == letters.upper() and len(s) < 80:
+        return False
+    if "@" in s:
+        return False
+    if _CONTACT_RE.search(s):
+        return False
+    return True
+
+
+def _collect_paragraphs(doc: Any) -> list[Any]:
+    """Walk top-level paragraphs + table cell paragraphs, dans l'ordre de
+    lecture. Retourne la liste des objets Paragraph (python-docx).
+    L'index dans cette liste sert de clé pour les éditions Gemini.
+    """
+    paras: list[Any] = []
+    for p in doc.paragraphs:
+        paras.append(p)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    paras.append(p)
+    return paras
+
+
+def _set_paragraph_text(para: Any, new_text: str) -> None:
+    """Remplace le texte d'un paragraphe en conservant le formatting de son
+    premier run (font, gras, italique, couleur, taille). Les runs suivants
+    sont vidés.
+
+    Compromis assumé : un paragraphe avec runs de styles mixtes (e.g.
+    moitié bold / moitié plain) perd cette mixité — l'ensemble prend le
+    style du premier run. Sur les bullets d'un CV typique c'est invisible
+    parce que le formatting est uniforme par paragraphe.
+    """
+    runs = para.runs
+    if not runs:
+        para.add_run(new_text)
+        return
+    runs[0].text = new_text
+    for r in runs[1:]:
+        r.text = ""
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Gemini call
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def _strip_md_fences(text: str) -> str:
-    cleaned = text.strip()
-    fence = re.match(r"^```(?:markdown|md)?\s*(.*?)\s*```$", cleaned, re.DOTALL)
-    if fence:
-        return fence.group(1).strip()
-    return cleaned
-
-
 def _call_gemini(prompt: str) -> str:
-    """Appelle Gemini en mode texte (pas JSON). Isolé pour faciliter le mock."""
+    """Appelle Gemini en mode JSON. Isolé pour faciliter le mock."""
     from google import genai
     from google.genai import types
 
@@ -237,344 +271,118 @@ def _call_gemini(prompt: str) -> str:
         contents=prompt,
         config=types.GenerateContentConfig(
             temperature=0.4,
-            response_mime_type="text/plain",
+            response_mime_type="application/json",
         ),
     )
     return response.text or ""
 
 
-def _build_prompt(base_cv: str, offer: dict[str, Any], profile: dict[str, Any]) -> str:
-    """Construit le prompt avec sections délimitées pour Gemini."""
-    import json
-
-    offer_compact = {k: v for k, v in offer.items() if v and k not in ("description", "url")}
-    return (
-        f"{_SYSTEM}\n\n"
-        f"--- BASE CV (DOCX text) ---\n{base_cv[:MAX_BASE_CV_CHARS]}\n\n"
-        f"--- OFFER ESSENTIALS ---\n{json.dumps(offer_compact, ensure_ascii=False, indent=2)}\n\n"
-        f"--- PROFILE FACTS ---\n{json.dumps(profile, ensure_ascii=False, indent=2)}\n"
-    )
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# Summary generation (separate Gemini pass, optional)
-# ──────────────────────────────────────────────────────────────────────────
-
-
-def _clean_summary(raw: str) -> str:
-    """Trim quotes, fences and stray markdown headings from the LLM output."""
-    text = raw.strip()
-    # Strip surrounding quotes (single, double, smart)
-    for q in ('"', "'", "“", "”", "‘", "’"):
-        if text.startswith(q) and text.endswith(q) and len(text) > 1:
-            text = text[1:-1].strip()
-    # Strip accidental code fence
-    fence = re.match(r"^```[a-zA-Z]*\s*(.*?)\s*```$", text, re.DOTALL)
-    if fence:
-        text = fence.group(1).strip()
-    # Strip accidental leading heading marker
-    text = re.sub(r"^#+\s*", "", text).strip()
-    # Drop a leading "Summary" line — handles both "Summary: ..." (inline)
-    # and "Summary\n..." (heading-style)
-    text = re.sub(
-        r"^(summary|profile|objective)\s*[:\-—]\s*", "", text, flags=re.IGNORECASE
-    ).strip()
-    first_line, *rest = text.split("\n", 1)
-    if first_line.strip().lower() in {"summary", "profile", "objective"} and rest:
-        text = rest[0].strip()
-    return text
-
-
-def generate_summary(
+def _build_prompt(
+    editables: list[tuple[int, str]],
     offer: dict[str, Any],
     profile: dict[str, Any],
-    base_cv_text: str = "",
-) -> str | None:
-    """Generate a 2-3 sentence ATS-friendly summary tailored to the offer.
-
-    Args:
-        offer: structured offer essentials (title, company, skills, missions, ...).
-        profile: user_profile.json content (facts only, not the cover letter).
-        base_cv_text: raw text extracted from the candidate's base DOCX. Provides
-            additional concrete facts the structured profile may not expose.
-
-    Returns:
-        The cleaned summary string, or None if the step is disabled, the LLM
-        is unavailable, returns empty/short/invalid output, or any unexpected
-        error occurs. Never raises — the caller falls back to no summary.
-    """
-    if not os.getenv("GEMINI_API_KEY"):
-        logger.info("cv_tailor: summary skipped (no GEMINI_API_KEY)")
-        return None
-
-    import json
-
+) -> str:
+    """Construit le prompt avec les paragraphes numérotés à tailorer."""
     offer_compact = {
         k: v
         for k, v in offer.items()
-        if v and k in {"title", "company", "skills", "missions", "experience_level"}
+        if v and k not in ("description", "url")
     }
-    prompt = (
-        f"{_SUMMARY_SYSTEM}\n\n"
+    paragraphs_block = "\n".join(f"{idx}: {text}" for idx, text in editables)
+    return (
+        f"{_SYSTEM}\n\n"
         f"--- OFFER ---\n{json.dumps(offer_compact, ensure_ascii=False, indent=2)}\n\n"
         f"--- PROFILE ---\n{json.dumps(profile, ensure_ascii=False, indent=2)}\n\n"
-        f"--- BASE_CV ---\n{base_cv_text[:8000]}"
+        f"--- EDITABLE_PARAGRAPHS ---\n{paragraphs_block}\n"
     )
 
+
+def _parse_edits(raw: str) -> dict[int, str]:
+    """Parse la réponse JSON de Gemini en {idx: nouveau_texte}.
+
+    Tolère un wrapper code-fence si Gemini en remet malgré le mime-type.
+    """
+    cleaned = raw.strip()
+    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", cleaned, re.DOTALL)
+    if fence:
+        cleaned = fence.group(1).strip()
+    if not cleaned:
+        return {}
     try:
-        raw = _call_gemini(prompt)
+        payload = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Gemini JSON invalide: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("Gemini n'a pas renvoyé un objet JSON")
+    edits: dict[int, str] = {}
+    for k, v in payload.items():
+        try:
+            edits[int(k)] = str(v).strip()
+        except (TypeError, ValueError):
+            logger.warning("cv_tailor: clé non-entière ignorée — %r", k)
+    return edits
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# DOCX → PDF conversion
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _convert_docx_to_pdf(docx_path: Path, pdf_path: Path) -> None:
+    """Convertit un DOCX en PDF. Essaie docx2pdf (Word COM) puis LibreOffice.
+
+    docx2pdf utilise Microsoft Word via pywin32/COM sur Windows. Si Word
+    n'est pas installé, l'appel lève une exception et on bascule sur
+    `soffice --headless`. Si ni l'un ni l'autre n'est disponible, on lève
+    une RuntimeError avec instructions explicites pour l'utilisateur.
+    """
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Path 1 : Microsoft Word via docx2pdf (qualité PDF maximale,
+    # rendu 1:1 fidèle au DOCX)
+    try:
+        from docx2pdf import convert as _w_convert
+
+        _w_convert(str(docx_path), str(pdf_path))
+        if pdf_path.is_file():
+            logger.info("cv_tailor: PDF via docx2pdf -> %s", pdf_path)
+            return
     except Exception as exc:  # noqa: BLE001
-        logger.warning("cv_tailor: summary generation failed — %s", exc)
-        return None
+        logger.warning(
+            "cv_tailor: docx2pdf indisponible (%s), fallback LibreOffice", exc
+        )
 
-    cleaned = _clean_summary(raw or "")
-    if not cleaned or len(cleaned) < SUMMARY_MIN_LENGTH:
-        logger.info("cv_tailor: summary empty or too short, skipping")
-        return None
-
-    return cleaned
-
-
-def _inject_summary(md: str, summary: str) -> str:
-    """Insert a '## SUMMARY' section before the first existing '## ' heading.
-
-    If the Markdown has no other '## ' section, the SUMMARY block is appended
-    at the end. Idempotent on a SUMMARY-free input.
-    """
-    if not summary:
-        return md
-    block = f"## SUMMARY\n{summary}\n\n"
-    lines = md.split("\n")
-    for i, line in enumerate(lines):
-        if line.startswith("## "):
-            return "\n".join(lines[:i]) + ("\n" if i else "") + block + "\n".join(lines[i:])
-    # No H2 section — append at the end
-    return md.rstrip() + "\n\n" + block.rstrip() + "\n"
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# Markdown → PDF
-# ──────────────────────────────────────────────────────────────────────────
-
-_PDF_CSS = """
-@page { size: A4; margin: 1.4cm 1.6cm; }
-body {
-  font-family: 'Times', 'Times New Roman', serif;
-  font-size: 10.5pt;
-  color: #1a1a1a;
-  line-height: 1.38;
-}
-
-/* Header — centered, à la traditional CV */
-h1 {
-  font-size: 19pt;
-  font-weight: 700;
-  text-align: center;
-  margin: 0 0 2pt;
-}
-.tagline {
-  text-align: center;
-  font-size: 12pt;
-  font-weight: 700;
-  margin: 0 0 2pt;
-}
-.contact {
-  text-align: center;
-  font-size: 10pt;
-  color: #333;
-  margin: 0 0 12pt;
-}
-
-/* Section headers — uppercase + souligné */
-h2 {
-  font-size: 11pt;
-  font-weight: 700;
-  text-transform: uppercase;
-  margin: 11pt 0 4pt;
-  border-bottom: 0.6pt solid #000;
-  padding-bottom: 1pt;
-}
-
-/* Job / project / school header — h3 simple ou table 2 cols */
-h3 {
-  font-size: 11pt;
-  font-weight: 700;
-  margin: 7pt 0 1pt;
-}
-
-/* Table 2 cols pour "Company || Location" et "**Title** || *Date*" */
-table.row {
-  width: 100%;
-  margin: 0 0 1pt;
-  border: 0;
-}
-table.row td.left {
-  text-align: left;
-  vertical-align: top;
-}
-table.row td.right {
-  text-align: right;
-  vertical-align: top;
-}
-table.row td.bold { font-weight: 700; }
-table.row td.italic { font-style: italic; }
-
-/* Description courte sous l'en-tête de job (italic, gris discret) */
-.desc {
-  font-size: 9.5pt;
-  color: #555;
-  font-style: italic;
-  margin: 0 0 1pt;
-}
-
-p { margin: 2pt 0; }
-ul {
-  padding-left: 16pt;
-  margin: 3pt 0 4pt;
-}
-li {
-  margin-bottom: 1pt;
-}
-strong { font-weight: 700; }
-em { font-style: italic; }
-"""
-
-
-def _inline_md(text: str) -> str:
-    """Inline markdown : **bold** -> <strong>, *italic* -> <em>."""
-    text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
-    text = re.sub(r"(?<!\*)\*([^\*]+?)\*(?!\*)", r"<em>\1</em>", text)
-    return text
-
-
-def _strip_outer_bold(text: str) -> str:
-    m = re.match(r"^\*\*(.+?)\*\*$", text)
-    return _inline_md(m.group(1) if m else text)
-
-
-def _strip_outer_emph(text: str) -> str:
-    m = re.match(r"^\*(.+?)\*$", text)
-    return _inline_md(m.group(1) if m else text)
-
-
-def _md_to_html(md: str) -> str:
-    """Convertit notre Markdown 'tailoré CV' en HTML avec layout 2-colonnes.
-
-    Convention :
-      # Nom                              -> <h1>
-      Ligne 2                            -> tagline centrée
-      Ligne 3                            -> contact centré
-      ## SECTION                         -> <h2> souligné
-      ### Company || Location            -> table 2 cols (gauche bold)
-      **Job Title** || *Date range*      -> table 2 cols (gauche bold, droite italic)
-      - bullet                           -> <li> dans <ul>
-      texte                              -> <p>
-    """
-    lines = md.split("\n")
-    out: list[str] = []
-    in_list = False
-    in_header_region = False
-    header_lines_taken = 0  # 0 = tagline, 1+ = contact
-
-    def close_list() -> None:
-        nonlocal in_list
-        if in_list:
-            out.append("</ul>")
-            in_list = False
-
-    for raw in lines:
-        s = raw.strip()
-
-        if not s:
-            close_list()
-            continue
-
-        if s.startswith("# "):
-            close_list()
-            out.append(f"<h1>{_inline_md(s[2:].strip())}</h1>")
-            in_header_region = True
-            header_lines_taken = 0
-            continue
-
-        if s.startswith("## "):
-            close_list()
-            in_header_region = False
-            out.append(f"<h2>{_inline_md(s[3:].strip())}</h2>")
-            continue
-
-        if s.startswith("### "):
-            close_list()
-            in_header_region = False
-            content = s[4:].strip()
-            if "||" in content:
-                left, right = (x.strip() for x in content.split("||", 1))
-                out.append(
-                    '<table class="row"><tr>'
-                    f'<td class="left bold">{_inline_md(left)}</td>'
-                    f'<td class="right">{_inline_md(right)}</td>'
-                    "</tr></table>"
-                )
-            else:
-                out.append(f"<h3>{_inline_md(content)}</h3>")
-            continue
-
-        if s.startswith("- "):
-            in_header_region = False
-            if not in_list:
-                out.append("<ul>")
-                in_list = True
-            out.append(f"<li>{_inline_md(s[2:])}</li>")
-            continue
-
-        if s.startswith("**") and "||" in s:
-            close_list()
-            left, right = (x.strip() for x in s.split("||", 1))
-            out.append(
-                '<table class="row"><tr>'
-                f'<td class="left bold">{_strip_outer_bold(left)}</td>'
-                f'<td class="right italic">{_strip_outer_emph(right)}</td>'
-                "</tr></table>"
+    # Path 2 : LibreOffice headless
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if soffice:
+        try:
+            subprocess.run(
+                [
+                    soffice,
+                    "--headless",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    str(pdf_path.parent),
+                    str(docx_path),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=60,
             )
-            continue
+            produced = pdf_path.parent / f"{docx_path.stem}.pdf"
+            if produced != pdf_path and produced.is_file():
+                produced.replace(pdf_path)
+            logger.info("cv_tailor: PDF via LibreOffice -> %s", pdf_path)
+            return
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.decode(errors="replace") if exc.stderr else ""
+            logger.error("LibreOffice a échoué: %s", stderr)
 
-        if in_header_region:
-            close_list()
-            cls = "tagline" if header_lines_taken == 0 else "contact"
-            out.append(f'<p class="{cls}">{_inline_md(s)}</p>')
-            header_lines_taken += 1
-            continue
-
-        close_list()
-        out.append(f"<p>{_inline_md(s)}</p>")
-
-    close_list()
-    return "\n".join(out)
-
-
-def render_pdf(md_content: str, output_path: Path) -> Path:
-    """Convertit le Markdown en PDF via xhtml2pdf et l'écrit à output_path.
-
-    xhtml2pdf est 100% Python (reportlab + html5lib en interne) et n'a
-    aucune dépendance système — contrairement à WeasyPrint qui demande
-    GTK/Pango/Cairo, problématique sous Windows. On évite la lib
-    `markdown` car xhtml2pdf ne supporte pas le flex ; on émet
-    directement des <table> 2-colonnes pour le layout pro.
-    """
-    from xhtml2pdf import pisa
-
-    html_body = _md_to_html(md_content)
-    html_full = (
-        "<!doctype html><html><head><meta charset='utf-8'>"
-        f"<style>{_PDF_CSS}</style></head>"
-        f"<body>{html_body}</body></html>"
+    raise RuntimeError(
+        "Conversion DOCX -> PDF impossible : ni Microsoft Word (via docx2pdf) "
+        "ni LibreOffice (soffice) ne sont disponibles. Installe l'un des deux."
     )
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "wb") as f:
-        result = pisa.CreatePDF(src=html_full, dest=f, encoding="utf-8")
-    if result.err:
-        raise RuntimeError(f"xhtml2pdf a échoué ({result.err} erreur(s) de rendu)")
-    return output_path
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -583,23 +391,25 @@ def render_pdf(md_content: str, output_path: Path) -> Path:
 
 
 def tailor_cv(offer: dict[str, Any]) -> dict[str, Any]:
-    """Adapte le CV de base à l'offre, génère un PDF, retourne les métadonnées.
+    """Édite en place les paragraphes éditables du DOCX base et exporte en PDF.
 
     Args:
-        offer: champs structurés de l'offre (title, company, location, skills, etc.)
+        offer: champs structurés de l'offre (title, company, skills, ...).
 
     Returns:
         {
-            "saved_path": str,         # chemin absolu du PDF généré
-            "filename": str,           # nom du fichier seul
-            "folder": str,             # dossier entreprise
-            "markdown": str,           # contenu MD pour debug/preview
+            "saved_path": str,           # chemin absolu du PDF final
+            "saved_docx_path": str,      # chemin absolu du DOCX tailoré
+            "filename": str,             # nom du PDF seul
+            "folder": str,               # dossier entreprise
+            "edited_count": int,         # nb de paragraphes effectivement modifiés
+            "editable_count": int,       # nb de paragraphes envoyés au LLM
         }
 
     Raises:
         FileNotFoundError: profil ou base_cv_path absent
         ValueError: cv_output_dir manquant ou DOCX invalide
-        RuntimeError: clé API absente ou Gemini KO
+        RuntimeError: clé API absente, Gemini KO, ou conversion PDF impossible
     """
     if not os.getenv("GEMINI_API_KEY"):
         raise RuntimeError("GEMINI_API_KEY non configurée")
@@ -609,38 +419,65 @@ def tailor_cv(offer: dict[str, Any]) -> dict[str, Any]:
     if not base_path:
         raise ValueError("profile.base_cv_path n'est pas configuré (DOCX source manquant)")
 
-    base_text = read_base_cv(base_path)
-    if not base_text:
-        raise ValueError("Le DOCX est vide ou illisible")
+    base = Path(base_path).expanduser()
+    if not base.is_file():
+        raise FileNotFoundError(f"base_cv_path introuvable: {base}")
+    if base.suffix.lower() != ".docx":
+        raise ValueError(f"base_cv_path doit être un .docx (reçu: {base.suffix})")
 
-    output_path = resolve_output_path(profile, offer)
+    output_pdf = resolve_output_path(profile, offer)
+    output_docx = output_pdf.with_suffix(".docx")
 
-    # Optional tailored summary (default on). Failure is non-blocking.
-    include_summary = profile.get("include_summary", True)
-    summary: str | None = None
-    if include_summary:
-        summary = generate_summary(offer, profile, base_text)
-        logger.info(
-            "cv_tailor: summary=%s",
-            "ok" if summary else "skipped",
+    # 1. Charger le DOCX
+    from docx import Document
+
+    doc = Document(str(base))
+    paragraphs = _collect_paragraphs(doc)
+
+    # 2. Identifier les paragraphes éditables
+    editables: list[tuple[int, str]] = [
+        (i, p.text) for i, p in enumerate(paragraphs) if _is_editable(p.text)
+    ]
+    if not editables:
+        raise ValueError(
+            "Aucun paragraphe éditable détecté dans le DOCX (CV vide ou structure inattendue)"
         )
+    logger.info("cv_tailor: %d paragraphes éditables détectés", len(editables))
 
-    prompt = _build_prompt(base_text, offer, profile)
-    md_raw = _call_gemini(prompt)
-    md_content = _strip_md_fences(md_raw)
-    if not md_content.strip():
-        raise RuntimeError("Gemini a renvoyé un CV vide")
+    # 3. Demander à Gemini les versions tailorées
+    prompt = _build_prompt(editables, offer, profile)
+    raw = _call_gemini(prompt)
+    edits = _parse_edits(raw)
+    logger.info("cv_tailor: %d éditions reçues sur %d demandées", len(edits), len(editables))
 
-    if summary:
-        md_content = _inject_summary(md_content, summary)
+    # 4. Appliquer les éditions, en gardant l'index original
+    editable_idxs = {idx for idx, _ in editables}
+    edited_count = 0
+    for idx, new_text in edits.items():
+        if idx not in editable_idxs:
+            logger.warning("cv_tailor: idx %d hors liste editable, ignoré", idx)
+            continue
+        if not new_text:
+            continue
+        _set_paragraph_text(paragraphs[idx], new_text)
+        edited_count += 1
 
-    render_pdf(md_content, output_path)
+    # 5. Sauvegarder DOCX puis convertir en PDF
+    output_docx.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(str(output_docx))
+    _convert_docx_to_pdf(output_docx, output_pdf)
 
-    logger.info("cv_tailor: PDF généré -> %s", output_path)
+    logger.info(
+        "cv_tailor: PDF généré -> %s (%d/%d éditions appliquées)",
+        output_pdf,
+        edited_count,
+        len(editables),
+    )
     return {
-        "saved_path": str(output_path),
-        "filename": output_path.name,
-        "folder": str(output_path.parent),
-        "markdown": md_content,
-        "summary_used": bool(summary),
+        "saved_path": str(output_pdf),
+        "saved_docx_path": str(output_docx),
+        "filename": output_pdf.name,
+        "folder": str(output_pdf.parent),
+        "edited_count": edited_count,
+        "editable_count": len(editables),
     }

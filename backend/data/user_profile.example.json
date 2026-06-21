@@ -25,6 +25,5 @@
   "cv_path": "",
   "base_cv_path": "",
   "cv_output_dir": "",
-  "include_summary": true,
-  "_comment": "Copier ce fichier en user_profile.json (gitignoré). cv_path = PDF prêt-à-upload (peut rester vide, on génère). base_cv_path = chemin absolu vers ton DOCX source. cv_output_dir = dossier racine où les CV adaptés seront générés (ex: C:/Users/Alex/Documents/CVs). include_summary = true par défaut, met à false pour ne pas générer la section SUMMARY en tête du CV."
+  "_comment": "Copier ce fichier en user_profile.json (gitignoré). cv_path = PDF prêt-à-upload (peut rester vide, on génère). base_cv_path = chemin absolu vers ton DOCX source (.docx requis, .doc legacy non supporté). cv_output_dir = dossier racine où les CV adaptés seront générés (ex: C:/Users/Alex/Documents/CVs). Le pipeline /tailor-cv édite ce DOCX en place (texte des paragraphes éditables réécrit par Gemini, formatting conservé) puis convertit en PDF via docx2pdf (Word COM, qualité maximale) ou LibreOffice headless en fallback."
 }
