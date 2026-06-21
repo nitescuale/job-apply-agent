@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 
-const BACKEND_URL = 'http://localhost:8000'
 const STORAGE_KEY = 'job-apply-popup-state'
+const STALE_INFLIGHT_MS = 90_000 // au-delà, on considère que le worker a sauté
 
 const IS_MAC =
   typeof navigator !== 'undefined' && /mac/i.test(navigator.platform || navigator.userAgent)
@@ -59,18 +59,6 @@ type CvState = 'idle' | 'generating' | 'done' | 'error'
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────
 
-function sendMessageToTab<T = unknown>(tabId: number, message: unknown): Promise<T> {
-  return new Promise((resolve, reject) => {
-    chrome.tabs.sendMessage(tabId, message, (response) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error('Impossible de contacter la page. Recharge-la et réessaie.'))
-        return
-      }
-      resolve(response as T)
-    })
-  })
-}
-
 function formatRemote(v: boolean | string | undefined): string | null {
   if (v === undefined || v === null) return null
   if (typeof v === 'boolean') return v ? 'Oui' : 'Non'
@@ -107,10 +95,8 @@ const STYLES = `
   }
 
   .ja-panel {
-    width: 400px;
-    height: 600px;          /* Chrome/Firefox cap popups around 600px;
-                               on borne la panel pour que le body scroll
-                               proprement au lieu de se faire clipper. */
+    width: 100%;
+    height: 100%;
     background: var(--bg);
     color: var(--ink);
     font-family: var(--sans);
@@ -118,6 +104,7 @@ const STYLES = `
     line-height: 1.5;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
   }
 
   /* top bar */
@@ -191,7 +178,9 @@ const STYLES = `
   .ja-body {
     padding: 22px 22px 0;
     overflow-y: auto;
-    flex: 1;
+    overflow-x: hidden;
+    flex: 1 1 0;            /* flex-basis 0 + flex-grow 1 → prend la place
+                               restante et rien d'autre. */
     min-height: 0;          /* requis : sinon en flex column les enfants
                                refusent de shrink sous leur contenu et
                                le scroll ne s'active jamais. */
@@ -628,15 +617,6 @@ function TopBar({
   )
 }
 
-function friendlyFetchError(err: unknown): string {
-  // Firefox renvoie "NetworkError when attempting to fetch resource.",
-  // Chrome renvoie "Failed to fetch". Dans les deux cas c'est un TypeError
-  // levé par fetch() quand la connexion TCP n'aboutit pas.
-  if (err instanceof TypeError && /fetch|network/i.test(err.message)) {
-    return 'Backend injoignable sur localhost:8000. Lance .\\dev.ps1 puis réessaie.'
-  }
-  return err instanceof Error ? err.message : 'Erreur inconnue'
-}
 
 function Row({ label, value }: { label: string; value: string | null }) {
   const empty = value === null || value === ''
@@ -662,149 +642,115 @@ export default function Popup() {
   const [cvState, setCvState] = useState<CvState>('idle')
   const [cvResult, setCvResult] = useState<CvResult | null>(null)
   const [cvError, setCvError] = useState('')
-  // Le popup MV3 est détruit dès qu'on clique en dehors. On persiste
-  // l'état dans chrome.storage.local pour ne rien perdre entre deux
-  // ouvertures (résultat d'analyse, CV généré, rapport de fill).
-  const [hydrated, setHydrated] = useState(false)
-
-  // Hydrate au mount
-  useEffect(() => {
-    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
-      setHydrated(true)
-      return
-    }
-    chrome.storage.local.get(STORAGE_KEY, (data) => {
-      const saved = data[STORAGE_KEY] as Partial<{
-        status: Status
-        result: OfferResult | null
-        error: string
-        applyError: string
-        fillReport: FillReport | null
-        cvState: CvState
-        cvResult: CvResult | null
-        cvError: string
-      }> | undefined
-      if (saved) {
-        // Les états transitoires (in-flight) sont morts avec le popup —
-        // on les rabat sur un état stable au lieu de re-spinner à vide.
-        let s: Status = saved.status ?? 'idle'
-        if (s === 'scraping') s = 'idle'
-        if (s === 'applying') s = saved.result ? 'ready' : 'idle'
-        setStatus(s)
-        setResult(saved.result ?? null)
-        setError(saved.error ?? '')
-        setApplyError(saved.applyError ?? '')
-        setFillReport(saved.fillReport ?? null)
-        let cv: CvState = saved.cvState ?? 'idle'
-        if (cv === 'generating') cv = 'idle'
-        setCvState(cv)
-        setCvResult(saved.cvResult ?? null)
-        setCvError(saved.cvError ?? '')
+  // Le popup MV3 est détruit dès qu'on clique en dehors. Le boulot (fetch
+  // backend, content-script round-trips) est délégué au service worker
+  // (background.ts) qui survit aux fermetures, écrit son avancement dans
+  // chrome.storage.local, et nous notifie via onChanged. Le popup ne fait
+  // qu'hydrater + écouter — il ne possède plus l'état.
+  function applySnapshot(saved: Partial<{
+    status: Status
+    result: OfferResult | null
+    error: string
+    applyError: string
+    fillReport: FillReport | null
+    cvState: CvState
+    cvResult: CvResult | null
+    cvError: string
+    inflight: { kind: 'scrape' | 'apply' | 'tailor'; started_at: number } | null
+  }>) {
+    const inflight = saved.inflight
+    const isStale = !!inflight && Date.now() - inflight.started_at > STALE_INFLIGHT_MS
+    let s: Status = saved.status ?? 'idle'
+    let cv: CvState = saved.cvState ?? 'idle'
+    let err = saved.error ?? ''
+    let applyErr = saved.applyError ?? ''
+    let cvErr = saved.cvError ?? ''
+    if (isStale) {
+      // Le worker a probablement été tué (browser closed, very long idle)
+      // sans terminer son fetch. On rabat sur un état d'erreur explicite.
+      if (s === 'scraping') {
+        s = 'error'
+        err = err || 'Analyse interrompue. Réessaie.'
       }
-      setHydrated(true)
+      if (s === 'applying') {
+        s = 'apply-error'
+        applyErr = applyErr || 'Remplissage interrompu. Réessaie.'
+      }
+      if (cv === 'generating') {
+        cv = 'error'
+        cvErr = cvErr || 'Génération interrompue. Réessaie.'
+      }
+    }
+    setStatus(s)
+    setResult(saved.result ?? null)
+    setError(err)
+    setApplyError(applyErr)
+    setFillReport(saved.fillReport ?? null)
+    setCvState(cv)
+    setCvResult(saved.cvResult ?? null)
+    setCvError(cvErr)
+  }
+
+  // Hydrate au mount + écoute live des écritures background
+  useEffect(() => {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) return
+    chrome.storage.local.get(STORAGE_KEY, (data) => {
+      const saved = data[STORAGE_KEY]
+      if (saved) applySnapshot(saved)
     })
+    const onChanged = (
+      changes: { [key: string]: chrome.storage.StorageChange },
+      area: string,
+    ) => {
+      if (area !== 'local') return
+      const c = changes[STORAGE_KEY]
+      if (!c) return
+      if (c.newValue) applySnapshot(c.newValue)
+      else {
+        // RESET_STATE a supprimé la clé entière → retour à idle
+        setStatus('idle')
+        setResult(null)
+        setError('')
+        setApplyError('')
+        setFillReport(null)
+        setCvState('idle')
+        setCvResult(null)
+        setCvError('')
+      }
+    }
+    chrome.storage.onChanged.addListener(onChanged)
+    return () => chrome.storage.onChanged.removeListener(onChanged)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Persiste à chaque changement (après hydrate seulement, pour ne pas
-  // écraser l'état stocké avec les defaults pendant le 1er render).
-  useEffect(() => {
-    if (!hydrated) return
-    if (typeof chrome === 'undefined' || !chrome.storage?.local) return
-    chrome.storage.local.set({
-      [STORAGE_KEY]: {
-        status,
-        result,
-        error,
-        applyError,
-        fillReport,
-        cvState,
-        cvResult,
-        cvError,
-      },
-    })
-  }, [hydrated, status, result, error, applyError, fillReport, cvState, cvResult, cvError])
-
   async function handleAnalyze() {
-    setStatus('scraping')
-    setError('')
-    setApplyError('')
-    setFillReport(null)
     setDescExpanded(false)
-
-    try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
-      if (!tab.id) throw new Error('Onglet non trouvé')
-
-      const response = await sendMessageToTab<{ html: string; url: string }>(tab.id, {
-        type: 'CAPTURE_JOB_HTML',
-      })
-      if (!response?.html) throw new Error('Impossible de capturer le HTML')
-
-      const r = await fetch(`${BACKEND_URL}/scrape-job`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job_url: response.url, job_html: response.html }),
-      })
-
-      if (!r.ok) {
-        const txt = await r.text()
-        throw new Error(`Backend ${r.status} — ${txt.slice(0, 140)}`)
-      }
-
-      const data: OfferResult = await r.json()
-      setResult(data)
-      setStatus('ready')
-    } catch (err) {
-      setError(friendlyFetchError(err))
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+    if (!tab.id) {
+      setError('Onglet non trouvé')
       setStatus('error')
+      return
     }
+    // Le background tient le pipeline (capture + fetch + écriture storage).
+    // On ne touche pas à l'état local — onChanged va le pousser dès que le
+    // worker écrit 'scraping' puis 'ready'/'error'.
+    chrome.runtime.sendMessage({ type: 'START_ANALYZE', tabId: tab.id })
   }
 
   async function handleApply() {
     if (status === 'applying') return
-    setStatus('applying')
-    setApplyError('')
-    setFillReport(null)
-
-    try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
-      if (!tab.id) throw new Error('Onglet non trouvé')
-
-      const detected = await sendMessageToTab<{ schema: { fields: unknown[] } | null }>(tab.id, {
-        type: 'DETECT_FORM',
-      })
-      const schema = detected?.schema
-      if (!schema || !schema.fields || schema.fields.length === 0) {
-        throw new Error('Aucun formulaire détecté sur cette page')
-      }
-
-      // Si l'offre n'a pas été analysée au préalable (entrée directe depuis la
-      // page de candidature), on envoie un contexte vide — Gemini se base
-      // alors uniquement sur le profil pour remplir les champs.
-      const context = result
-        ? { title: result.title, company: result.company, location: result.location }
-        : {}
-      const res = await fetch(`${BACKEND_URL}/fill-form`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ form_schema: schema, context }),
-      })
-      if (!res.ok) {
-        const txt = await res.text()
-        throw new Error(`Backend ${res.status} — ${txt.slice(0, 160)}`)
-      }
-      const fillPayload = await res.json()
-
-      const report = await sendMessageToTab<FillReport>(tab.id, {
-        type: 'FILL_FORM',
-        payload: fillPayload,
-      })
-      setFillReport(report)
-      setStatus('applied')
-    } catch (err) {
-      setApplyError(friendlyFetchError(err))
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+    if (!tab.id) {
+      setApplyError('Onglet non trouvé')
       setStatus('apply-error')
+      return
     }
+    // Si l'offre n'a pas été analysée au préalable, on envoie un contexte
+    // vide — Gemini se base alors uniquement sur le profil pour remplir.
+    const context = result
+      ? { title: result.title, company: result.company, location: result.location }
+      : {}
+    chrome.runtime.sendMessage({ type: 'START_FILL_FORM', tabId: tab.id, context })
   }
 
   function handleOpenOriginal() {
@@ -815,41 +761,21 @@ export default function Popup() {
 
   async function handleTailorCv() {
     if (!result || cvState === 'generating') return
-    setCvState('generating')
-    setCvError('')
-    setCvResult(null)
-
-    try {
-      const offer = {
-        title: result.title,
-        company: result.company,
-        location: result.location,
-        contract_type: result.contract_type ?? result.employment_type,
-        salary: result.salary,
-        remote: result.remote,
-        experience_level: result.experience_level,
-        skills: result.skills,
-        missions: result.missions,
-        summary: result.summary,
-        description: result.description,
-        url: result.url,
-      }
-      const res = await fetch(`${BACKEND_URL}/tailor-cv`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ offer }),
-      })
-      if (!res.ok) {
-        const txt = await res.text()
-        throw new Error(`Backend ${res.status} — ${txt.slice(0, 180)}`)
-      }
-      const data: CvResult = await res.json()
-      setCvResult(data)
-      setCvState('done')
-    } catch (err) {
-      setCvError(friendlyFetchError(err))
-      setCvState('error')
+    const offer = {
+      title: result.title,
+      company: result.company,
+      location: result.location,
+      contract_type: result.contract_type ?? result.employment_type,
+      salary: result.salary,
+      remote: result.remote,
+      experience_level: result.experience_level,
+      skills: result.skills,
+      missions: result.missions,
+      summary: result.summary,
+      description: result.description,
+      url: result.url,
     }
+    chrome.runtime.sendMessage({ type: 'START_TAILOR_CV', offer })
   }
 
   function handleOpenCv() {
@@ -860,6 +786,8 @@ export default function Popup() {
   }
 
   function handleReset() {
+    // Local immédiat + signal au background qui wipe storage. onChanged
+    // ré-appliquera l'état vide, ce qui est idempotent côté React.
     setStatus('idle')
     setResult(null)
     setError('')
@@ -869,6 +797,7 @@ export default function Popup() {
     setCvState('idle')
     setCvResult(null)
     setCvError('')
+    chrome.runtime.sendMessage({ type: 'RESET_STATE' })
   }
 
   // Cmd+Enter / Ctrl+Enter triggers Postuler dès qu'on peut remplir un form
