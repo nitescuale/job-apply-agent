@@ -4,7 +4,8 @@ Pipeline :
     1. Lit le DOCX référencé par profile.base_cv_path → texte brut.
     2. Demande à Gemini de réécrire le CV en Markdown anglais, orienté ATS,
        en miroitant les mots-clés de l'offre sans inventer de faits.
-    3. Convertit le Markdown → HTML → PDF (WeasyPrint, style ATS-friendly).
+    3. Convertit le Markdown → HTML → PDF (xhtml2pdf, pure Python — pas de
+       dépendance GTK/Pango sous Windows comme avec WeasyPrint).
     4. Sauvegarde dans {cv_output_dir}/{Company_Sanitized}/0_cv_*.pdf
 """
 from __future__ import annotations
@@ -392,20 +393,29 @@ strong { font-weight: 600; }
 
 
 def render_pdf(md_content: str, output_path: Path) -> Path:
-    """Convertit le Markdown en PDF via WeasyPrint et l'écrit à output_path."""
+    """Convertit le Markdown en PDF via xhtml2pdf et l'écrit à output_path.
+
+    xhtml2pdf est 100% Python (reportlab + html5lib en interne) et n'a
+    aucune dépendance système — contrairement à WeasyPrint qui demande
+    GTK/Pango/Cairo, problématique sous Windows.
+    """
     import markdown
-    from weasyprint import CSS, HTML
+    from xhtml2pdf import pisa
 
     html_body = markdown.markdown(md_content, extensions=["extra", "sane_lists"])
     html_full = (
-        "<!doctype html><html><head><meta charset='utf-8'></head>"
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        f"<style>{_PDF_CSS}</style></head>"
         f"<body>{html_body}</body></html>"
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    HTML(string=html_full).write_pdf(
-        target=str(output_path), stylesheets=[CSS(string=_PDF_CSS)]
-    )
+    with open(output_path, "wb") as f:
+        result = pisa.CreatePDF(src=html_full, dest=f, encoding="utf-8")
+    if result.err:
+        raise RuntimeError(
+            f"xhtml2pdf a échoué ({result.err} erreur(s) de rendu)"
+        )
     return output_path
 
 

@@ -35,7 +35,7 @@ job-apply-agent/
 │   │   ├── job_scraper.py           Scrapling: JSON-LD → meta → text fallback
 │   │   ├── llm_extractor.py         Gemini: filters noise, structures essentials
 │   │   ├── form_filler.py           Gemini: maps form_schema + profile → values
-│   │   └── cv_tailor.py             Gemini + WeasyPrint: DOCX base → tailored PDF
+│   │   └── cv_tailor.py             Gemini + xhtml2pdf: DOCX base → tailored PDF
 │   └── data/
 │       ├── user_profile.example.json
 │       └── user_profile.json        (gitignored, your real profile)
@@ -98,7 +98,7 @@ Gemini #2: receives base CV text + offer essentials + profile facts,
         targets one page (~600 words). Summary section is NOT written
         by this pass — it is prepended from the first call.
         ↓
-markdown → HTML → WeasyPrint → PDF (A4, Helvetica 10.5pt,
+markdown → HTML → xhtml2pdf → PDF (A4, Helvetica 10.5pt,
         uppercase letter-spaced sections, single column)
         ↓
 Saved to {cv_output_dir}/{Company_Sanitized}/

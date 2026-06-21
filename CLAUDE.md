@@ -11,7 +11,7 @@ FastAPI. Le backend :
    le résultat via Gemini (filtre + structure : titre, entreprise, skills,
    missions, summary).
 2. génère un CV adapté à l'offre depuis un DOCX de base + le profil
-   utilisateur, rendu en PDF ATS-friendly via WeasyPrint.
+   utilisateur, rendu en PDF ATS-friendly via xhtml2pdf.
 3. détecte le formulaire de candidature et le remplit (text, select, radio,
    checkbox, file) à partir du profil + contexte de l'offre via Gemini.
 
@@ -36,7 +36,7 @@ job-apply-agent/
 │   │   ├── llm_extractor.py        Gemini : filtre/structure l'offre
 │   │   ├── form_filler.py          Gemini : profil + form_schema → values
 │   │   └── cv_tailor.py            Gemini (2 passes : summary + CV) +
-│   │                               python-docx + WeasyPrint → PDF
+│   │                               python-docx + xhtml2pdf → PDF
 │   └── data/
 │       ├── user_profile.example.json
 │       └── user_profile.json       gitignoré (profil réel)
@@ -56,7 +56,9 @@ job-apply-agent/
   Manifest V3
 - **Backend** : Python 3.11+ (3.10 ok), FastAPI, uvicorn, **Scrapling** (HTML)
 - **LLM** : Google Gemini (`google-genai`), `gemini-2.5-flash`, tier gratuit
-- **CV pipeline** : `python-docx` (DOCX in), `markdown` + `weasyprint` (PDF out)
+- **CV pipeline** : `python-docx` (DOCX in), `markdown` + `xhtml2pdf` (PDF out,
+  pure Python — pas de dépendance système, contrairement à WeasyPrint qui
+  exige GTK/Pango sous Windows)
 - **Design** : Hanken Grotesk + Spline Sans Mono + JetBrains Mono, fond
   `#f7f7f5`, accent vert `#3d7d5a`
 
@@ -91,7 +93,7 @@ job-apply-agent/
    les bullets, n'invente jamais dates ni titres, vise ~600 mots. Cette
    passe ne produit PAS de section Summary (le prompt l'interdit) — le
    summary est injecté ensuite via `_inject_summary` avant le premier `## `.
-4. Markdown → HTML → **WeasyPrint** PDF (A4, Helvetica 10.5pt, marges 1.6cm,
+4. Markdown → HTML → **xhtml2pdf** PDF (A4, Helvetica 10.5pt, marges 1.6cm,
    sections uppercase letter-spaced, mono-colonne ATS-friendly).
 5. Sauvegarde : `{cv_output_dir}/{Company_Sanitized}/0_cv_firstname_lastname_jobtitle_company.pdf`.
    `_slug` normalise via `unicodedata.NFKD` + regex (`L'Oréal` → `LOreal`).
@@ -182,7 +184,7 @@ Codes d'erreur :
   loggée. Créer sur https://aistudio.google.com/apikey.
 - **uvicorn `--reload`** ne watch pas `.env` : changer la clé impose un
   redémarrage complet (`dev.ps1` tue les orphelins sur 8000/5173).
-- **Tests** : un fichier par agent dans `tests/`, mocks Gemini + WeasyPrint.
+- **Tests** : un fichier par agent dans `tests/`, mocks Gemini + xhtml2pdf.
 - **Encoding** : `dev.ps1` en ASCII pur (Windows PowerShell lit CP-1252 par
   défaut).
 - **Profil utilisateur** : `backend/data/user_profile.json` est gitignoré.
