@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 
+const BACKEND_URL = 'http://localhost:8000'
 const STORAGE_KEY = 'job-apply-popup-state'
 const STALE_INFLIGHT_MS = 90_000 // au-delà, on considère que le worker a sauté
 
@@ -552,6 +553,23 @@ const STYLES = `
     word-break: break-all;
     line-height: 1.5;
   }
+  .ja-cv-regen {
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 8px 0 0;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--mut);
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-color: var(--line);
+    text-underline-offset: 3px;
+  }
+  .ja-cv-regen:hover {
+    color: var(--ink);
+    text-decoration-color: var(--mut);
+  }
   .ja-cv-error {
     font-family: var(--mono);
     font-size: 10.5px;
@@ -778,11 +796,27 @@ export default function Popup() {
     chrome.runtime.sendMessage({ type: 'START_TAILOR_CV', offer })
   }
 
-  function handleOpenCv() {
+  async function handleOpenCv() {
     if (!cvResult?.saved_path) return
-    // Chrome accepte file:// dans un nouvel onglet pour visualiser un PDF local
-    const url = 'file:///' + cvResult.saved_path.replace(/\\/g, '/')
-    chrome.tabs.create({ url })
+    // Chrome MV3 et Firefox bloquent silencieusement chrome.tabs.create avec
+    // un file:// (sauf option "Autoriser l'accès aux URL de fichier" activée
+    // manuellement). On route via le backend qui ouvre le PDF dans le lecteur
+    // par défaut de l'OS (os.startfile / xdg-open / open) — UX identique sur
+    // Chrome et Firefox sans demander de droit spécial.
+    try {
+      const res = await fetch(`${BACKEND_URL}/open-file`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: cvResult.saved_path }),
+      })
+      if (!res.ok) {
+        const txt = await res.text()
+        throw new Error(`Backend ${res.status} — ${txt.slice(0, 140)}`)
+      }
+    } catch (err) {
+      setCvError(err instanceof Error ? err.message : 'Erreur inconnue')
+      setCvState('error')
+    }
   }
 
   function handleReset() {
@@ -1005,6 +1039,9 @@ export default function Popup() {
                   ✓ Ouvrir le PDF
                 </button>
                 <div className="ja-cv-file">{cvResult.filename}</div>
+                <button className="ja-cv-regen" onClick={handleTailorCv}>
+                  ↻ régénérer
+                </button>
               </>
             )}
 

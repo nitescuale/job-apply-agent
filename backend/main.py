@@ -1,5 +1,8 @@
 import asyncio
 import logging
+import os
+import subprocess
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -50,6 +53,10 @@ class FillFormRequest(BaseModel):
 
 class TailorCvRequest(BaseModel):
     offer: dict
+
+
+class OpenFileRequest(BaseModel):
+    path: str
 
 
 @app.get("/health")
@@ -133,6 +140,59 @@ async def tailor_cv_endpoint(request: TailorCvRequest):
     except Exception as exc:  # noqa: BLE001
         logger.exception("tailor-cv: erreur inattendue")
         raise HTTPException(status_code=500, detail=f"Tailor error: {exc}")
+
+
+@app.post("/open-file")
+async def open_file_endpoint(request: OpenFileRequest):
+    """Ouvre un fichier local (PDF tailoré, DOCX intermédiaire) dans le
+    lecteur par défaut de l'OS.
+
+    Existence d'un endpoint backend pour ça : Chrome MV3 et Firefox bloquent
+    silencieusement `chrome.tabs.create({url: 'file://...'})` à moins
+    d'avoir activé manuellement "Autoriser l'accès aux URL de fichier"
+    dans about:addons / chrome://extensions. Plutôt que de demander à
+    l'utilisateur ce flag, on passe par l'OS : `os.startfile` sur Windows,
+    `open` sur macOS, `xdg-open` sur Linux. L'utilisateur voit son PDF
+    dans son lecteur habituel (Acrobat, Edge, Preview, etc.).
+
+    Sécurité : on n'ouvre QUE des fichiers situés sous `cv_output_dir`
+    du profil, et UNIQUEMENT avec extensions .pdf ou .docx. Ça empêche
+    qu'un appel malformé déclenche l'exécution d'un binaire arbitraire.
+    """
+    p = Path(request.path).expanduser().resolve()
+
+    profile = form_filler.load_profile()
+    allowed_root = (profile.get("cv_output_dir") or "").strip()
+    if not allowed_root:
+        raise HTTPException(status_code=412, detail="cv_output_dir non configuré")
+    allowed = Path(allowed_root).expanduser().resolve()
+
+    if not p.is_relative_to(allowed):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Chemin hors cv_output_dir: {p}",
+        )
+    if p.suffix.lower() not in (".pdf", ".docx"):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Extension non autorisée: {p.suffix}",
+        )
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail=f"Fichier introuvable: {p}")
+
+    logger.info("POST /open-file -> %s", p)
+    try:
+        if sys.platform == "win32":
+            os.startfile(str(p))  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(p)])
+        else:
+            subprocess.Popen(["xdg-open", str(p)])
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("open-file: erreur OS")
+        raise HTTPException(status_code=500, detail=f"OS open error: {exc}")
+
+    return {"opened": str(p)}
 
 
 @app.post("/scrape-job")
