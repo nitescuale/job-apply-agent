@@ -1,5 +1,76 @@
 # REPORT.md — Job Apply Agent MVP
 
+## 2026-06-23 — Tailoring strictly scoped + filename convention propre
+
+### Implémenté
+
+- **Filename convention** : `0_CV_Firstname_Lastname_JobTitle.pdf`
+  (vs ancien `0_cv_firstname_lastname_jobtitle_company.pdf`). Changements :
+  CV en majuscules, prénom/nom Title-case, titre canonicalisé (drop
+  parenthétiques, suffixes après tiret, marqueurs F/H), nom d'entreprise
+  retiré (déjà dans le dossier parent). Exemple :
+  "Deep Learning Algorithm Graduate (TikTok Search Ranking) - 2026 Start
+  (BS/MS)" -> `0_CV_Alexandru_Nitescu_Deep_Learning_Algorithm_Graduate.pdf`.
+- **`_canonical_job_title`** + **`_slug_title`** : nouveaux helpers.
+  `_slug_title` préserve les acronymes ALL-CAPS courts (BS, MS, AI, ML,
+  NLP) au lieu de les rabattre en Title case (Bs/Ms/...).
+- **Tailoring section-aware** : la liste d'éditables n'est plus une
+  heuristique liberale sur tous les bullets ; elle est strictement scopée
+  via `_collect_editable_in_sections(doc)` à :
+  - tout paragraphe substantiel sous **SUMMARY**
+  - UNIQUEMENT la ligne **'Relevant coursework...'** sous **EDUCATION**
+  Tout le reste (header, contact, EXPERIENCE bullets, PROJECTS, SKILLS,
+  LANGUAGES, CERTIFICATIONS) reste gelé avec formatting d'origine
+  préservé.
+- **`_is_section_header`** + **`_normalize_section`** : détecte les
+  en-têtes (all-caps, ≤50 chars, tabs tolérées car Word ajoute des tabs
+  de padding) et les mappe vers un tag canonique via `_SECTION_KEYWORDS`
+  (SUMMARY accepte SUMMARY/PROFILE/OBJECTIVE/ABOUT, EDUCATION accepte
+  EDUCATION/ACADEMIC/DIPLOMA, etc.).
+- **Comportement empty editable** : si le DOCX ne contient ni SUMMARY ni
+  Relevant coursework, on ne crashe plus avec ValueError — on convertit
+  le DOCX tel quel en PDF. L'utilisateur récupère son CV original dans
+  le dossier de l'offre, sans tailoring.
+- **Tests** : test_cv_tailor.py refondu — 36 tests (vs 25 avant) :
+  `_slug_title` (Title case, acronymes), `_canonical_job_title` (parens,
+  dashes en/em, gender markers, slash AI/ML préservé),
+  `make_filename` (nouvelle convention, F/H stripping, fallback),
+  `_is_section_header`, `_normalize_section`,
+  `_collect_editable_in_sections` (picks SUMMARY content, picks
+  Relevant coursework, ignores EXPERIENCE bullets, ignores EDUCATION
+  projects, empty fallback), orchestration end-to-end avec rogue idx
+  filtré. Sur le vrai CV.docx de l'user : 43 paragraphes -> 2 éditables
+  (SUMMARY content + Relevant coursework). Suite totale : 96 verts.
+
+### Décisions
+
+- **Scope strict** plutôt qu'heuristique généreuse : la session
+  précédente tailorait n'importe quel paragraphe substantiel, ce qui
+  cassait le formatting du CV utilisateur (texte mis en gras par
+  erreur, structure perturbée). Le retour explicite : ne JAMAIS toucher
+  aux bullets EXPERIENCE ou aux descriptions de projets — un CV tailoré
+  doit rester visuellement IDENTIQUE au CV de base, sauf pour les
+  passages où le tailoring a vraiment du sens (positionnement narratif
+  = SUMMARY, mots-clés académiques = coursework).
+- **Filename sans company** : redondant avec le dossier parent
+  `{cv_output_dir}/{Company}/`. Économise des caractères dans les noms
+  trop longs et reflète la convention demandée (CV_Prénom_Nom_Titre).
+- **Title case explicite** pour le prénom/nom plutôt que `_slug(allow_caps=True)`
+  qui se contente de préserver la casse d'entrée : garantit un rendu
+  uniforme même si le profil contient des noms en lowercase.
+- **Acronymes ≤4 chars préservés** : BS_MS reste BS_MS, pas Bs_Ms. La
+  longueur 4 couvre les acronymes courants (AI, ML, BS, MS, NLP, CDI,
+  GPT) sans risquer de garder des mots normaux comme "Time" en TIME.
+
+### Blocages
+
+Aucun. Les anciens tests qui dépendaient de `_is_editable` (renommé en
+`_is_substantive`) et de l'orchestrator avec fixture sans SUMMARY ont
+été réécrits autour de la nouvelle fixture `_make_user_like_docx` qui
+mime un CV réaliste (header + SUMMARY + EXPERIENCE + EDUCATION).
+
+---
+
 ## 2026-06-23 — SQLite tracking + cache scrape-job
 
 ### Implémenté

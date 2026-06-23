@@ -155,15 +155,61 @@ def _slug(s: str | None, *, allow_caps: bool = False) -> str:
     return text if allow_caps else text.lower()
 
 
+def _slug_title(s: str | None) -> str:
+    """Slug + Title-case par token. Préserve les acronymes ALL-CAPS courts
+    (BS, MS, AI, ML, NLP, ...) intacts au lieu de les rabattre en Title.
+    Utilisé pour la convention de nommage CV_Firstname_Lastname_JobTitle."""
+    if not s:
+        return ""
+    raw = _slug(s, allow_caps=True)
+    tokens: list[str] = []
+    for tok in raw.split("_"):
+        if not tok:
+            continue
+        if tok.isupper() and len(tok) <= 4:
+            tokens.append(tok)
+        else:
+            tokens.append(tok[:1].upper() + tok[1:].lower())
+    return "_".join(tokens)
+
+
+def _canonical_job_title(title: str | None) -> str:
+    """Réduit un titre d'offre à sa forme canonique pour un nom de fichier.
+
+    Drop : parenthétiques `(...)`, suffixes après tiret long/court/em,
+    marqueurs de genre F/H, H/F, M/F.
+
+        "Deep Learning Algorithm Graduate (TikTok Search Ranking) - 2026 Start (BS/MS)"
+          -> "Deep Learning Algorithm Graduate"
+        "Senior Data Scientist F/H"  -> "Senior Data Scientist"
+        "AI/ML Engineer"             -> "AI/ML Engineer"  (slash préservé hors F/H)
+    """
+    if not title:
+        return ""
+    t = title
+    t = re.sub(r"\s*\([^)]*\)", "", t)
+    t = re.split(r"\s+[-–—]\s+", t, maxsplit=1)[0]
+    t = re.sub(r"\s+[FfHhMm]/[FfHhMm]\b", "", t)
+    return t.strip()
+
+
 def make_filename(profile: dict[str, Any], offer: dict[str, Any]) -> str:
-    """Convention : 0_cv_firstname_lastname_jobtitle_company.pdf"""
+    """Convention : 0_CV_Firstname_Lastname_JobTitle.pdf
+
+    - "CV" en majuscules, pas "cv".
+    - Prénom / nom Title-case (Alexandru, Nitescu, pas alexandru_nitescu).
+    - Titre d'offre canonicalisé (parenthétiques et suffixes drop, voir
+      `_canonical_job_title`) et Title-case.
+    - PAS de nom d'entreprise dans le filename — c'est déjà dans le dossier
+      parent.
+    """
+    short_title = _canonical_job_title(offer.get("title"))
     parts = [
         "0",
-        "cv",
-        _slug(profile.get("first_name")) or "x",
-        _slug(profile.get("last_name")) or "x",
-        _slug(offer.get("title")) or "role",
-        _slug(offer.get("company")) or "company",
+        "CV",
+        _slug_title(profile.get("first_name")) or "X",
+        _slug_title(profile.get("last_name")) or "X",
+        _slug_title(short_title) or "Role",
     ]
     base = "_".join(p for p in parts if p)
     return f"{base}.pdf"
@@ -188,16 +234,13 @@ _CONTACT_RE = re.compile(
 )
 
 
-def _is_editable(text: str) -> bool:
-    """Heuristique : un paragraphe est éditable s'il contient du contenu
-    substantiel (un bullet de réalisation, le summary, une description de
-    projet) plutôt que de la mise en page (entête de section, ligne de
-    contact, ligne tab-séparée company/location).
+def _is_substantive(text: str) -> bool:
+    """Vrai si le texte est un paragraphe de contenu (vs mise en page).
 
     Règles cumulatives — toutes doivent être vraies :
-      - longueur ≥ 25 caractères (filtre les section headers, noms, dates)
+      - longueur ≥ 25 caractères (filtre noms, dates courtes)
       - pas de tabulation (filtre les lignes alignées droite tab-séparées)
-      - pas en MAJUSCULES seules (filtre EXPERIENCE, EDUCATION, ...)
+      - pas tout-en-MAJUSCULES (filtre les en-têtes de section)
       - pas d'@ (filtre les emails)
       - pas de pattern contact (téléphone, URL, github/linkedin)
     """
@@ -206,7 +249,6 @@ def _is_editable(text: str) -> bool:
         return False
     if "\t" in s:
         return False
-    # Tous-caps seuls (ignorant ponctuation) → en-tête de section
     letters = re.sub(r"[^A-Za-z]", "", s)
     if letters and letters == letters.upper() and len(s) < 80:
         return False
@@ -215,6 +257,90 @@ def _is_editable(text: str) -> bool:
     if _CONTACT_RE.search(s):
         return False
     return True
+
+
+# Mapping mot-clé -> section canonique. On essaie d'absorber les variantes
+# de naming usuelles (SUMMARY/PROFILE/OBJECTIVE, EDUCATION/ACADEMIC, etc.)
+_SECTION_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "SUMMARY": ("SUMMARY", "PROFILE", "OBJECTIVE", "ABOUT"),
+    "EXPERIENCE": ("EXPERIENCE", "WORK", "EMPLOYMENT"),
+    "EDUCATION": ("EDUCATION", "ACADEMIC", "DIPLOMA"),
+    "PROJECTS": ("PROJECT",),
+    "SKILLS": ("SKILL", "TECH STACK"),
+    "LANGUAGES": ("LANGUAGE",),
+    "CERTIFICATIONS": ("CERTIFICATION", "AWARD", "CREDENTIAL", "ACCOMPLISHMENT"),
+    "ADDITIONAL": ("ADDITIONAL", "OTHER", "MISC", "INTEREST"),
+}
+
+
+def _is_section_header(text: str) -> bool:
+    """Vrai si le paragraphe ressemble à un en-tête de section (tout-en-CAPS,
+    court). Strip whitespace + tabs avant l'analyse (Word ajoute parfois des
+    tabulations de padding sur les headers)."""
+    s = re.sub(r"\s+", " ", text).strip()
+    if not s:
+        return False
+    letters = re.sub(r"[^A-Za-z]", "", s)
+    if not letters:
+        return False
+    if letters != letters.upper():
+        return False
+    return len(s) <= 50
+
+
+def _normalize_section(text: str) -> str | None:
+    """Map un texte d'en-tête vers son tag de section canonique, ou None si
+    ce n'est pas un en-tête (le caller ignore l'enregistrement)."""
+    if not _is_section_header(text):
+        return None
+    t = text.strip().upper()
+    for canonical, keywords in _SECTION_KEYWORDS.items():
+        if any(kw in t for kw in keywords):
+            return canonical
+    # En-tête tout-caps non reconnu — on retourne quand même un tag (l'upper
+    # du texte) pour qu'on n'édite plus rien sous cet en-tête inconnu.
+    return t
+
+
+def _collect_editable_in_sections(doc: Any) -> list[tuple[int, str]]:
+    """Filtre section-aware : ne renvoie QUE les paragraphes à tailorer.
+
+    Règle stricte (issue d'un retour utilisateur explicite) :
+      - sous SUMMARY : tout paragraphe substantiel (1 ou 2 max en pratique)
+      - sous EDUCATION : UNIQUEMENT la ligne "Relevant coursework..."
+      - tout le reste (header, contact, EXPERIENCE bullets, PROJECTS desc,
+        SKILLS, LANGUAGES, CERTIFICATIONS) reste gelé, formatting d'origine
+        préservé.
+
+    Returns:
+        [(paragraph_index, original_text), ...] aligné avec
+        `_collect_paragraphs(doc)`.
+    """
+    paragraphs = _collect_paragraphs(doc)
+    current_section: str | None = None
+    editables: list[tuple[int, str]] = []
+
+    for i, p in enumerate(paragraphs):
+        text = p.text
+        if not text or not text.strip():
+            continue
+
+        new_section = _normalize_section(text)
+        if new_section is not None:
+            current_section = new_section
+            continue
+
+        if current_section == "SUMMARY" and _is_substantive(text):
+            editables.append((i, text))
+            continue
+
+        if current_section == "EDUCATION" and text.lower().lstrip().startswith(
+            "relevant coursework"
+        ):
+            editables.append((i, text))
+            continue
+
+    return editables
 
 
 def _collect_paragraphs(doc: Any) -> list[Any]:
@@ -434,14 +560,33 @@ def tailor_cv(offer: dict[str, Any]) -> dict[str, Any]:
     doc = Document(str(base))
     paragraphs = _collect_paragraphs(doc)
 
-    # 2. Identifier les paragraphes éditables
-    editables: list[tuple[int, str]] = [
-        (i, p.text) for i, p in enumerate(paragraphs) if _is_editable(p.text)
-    ]
+    # 2. Identifier les paragraphes éditables (section-aware, stricte) :
+    #    SUMMARY content + 'Relevant coursework...' dans EDUCATION. Le reste
+    #    du CV (EXPERIENCE bullets, PROJECTS, SKILLS, LANGUAGES, headers,
+    #    contact) reste gelé. C'est volontairement conservateur — l'objectif
+    #    est de ne JAMAIS toucher au formatting du CV de base, et de cibler
+    #    uniquement les deux endroits qui ont un sens à être tailorés à
+    #    l'offre.
+    editables = _collect_editable_in_sections(doc)
+    output_docx.parent.mkdir(parents=True, exist_ok=True)
+
     if not editables:
-        raise ValueError(
-            "Aucun paragraphe éditable détecté dans le DOCX (CV vide ou structure inattendue)"
+        # Pas d'erreur — on convertit le DOCX tel quel en PDF. L'utilisateur
+        # récupère son CV original dans le dossier de l'offre.
+        logger.warning(
+            "cv_tailor: aucun paragraphe SUMMARY/coursework détecté, "
+            "conversion DOCX -> PDF sans tailoring"
         )
+        doc.save(str(output_docx))
+        _convert_docx_to_pdf(output_docx, output_pdf)
+        return {
+            "saved_path": str(output_pdf),
+            "saved_docx_path": str(output_docx),
+            "filename": output_pdf.name,
+            "folder": str(output_pdf.parent),
+            "edited_count": 0,
+            "editable_count": 0,
+        }
     logger.info("cv_tailor: %d paragraphes éditables détectés", len(editables))
 
     # 3. Demander à Gemini les versions tailorées
@@ -463,7 +608,6 @@ def tailor_cv(offer: dict[str, Any]) -> dict[str, Any]:
         edited_count += 1
 
     # 5. Sauvegarder DOCX puis convertir en PDF
-    output_docx.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_docx))
     _convert_docx_to_pdf(output_docx, output_pdf)
 

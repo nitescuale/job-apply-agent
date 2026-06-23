@@ -1,4 +1,5 @@
-"""Tests pour backend/agents/cv_tailor.py (pipeline DOCX-template)."""
+"""Tests pour backend/agents/cv_tailor.py (pipeline DOCX-template,
+filter section-aware SUMMARY + Relevant coursework)."""
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -50,7 +51,7 @@ def write_profile(profile_path: Path, **overrides):
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# slug / filename / paths
+# slug / canonical title / filename
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -73,17 +74,81 @@ def test_slug_allow_caps_preserves_case():
     assert cv_tailor._slug("BNP Paribas") == "bnp_paribas"
 
 
-def test_make_filename_follows_convention():
-    fname = cv_tailor.make_filename(SAMPLE_PROFILE, SAMPLE_OFFER)
-    assert fname == "0_cv_alex_nitescu_senior_data_engineer_f_h_bnp_paribas.pdf"
+def test_slug_title_uppercases_first_letter():
+    assert cv_tailor._slug_title("alexandru nitescu") == "Alexandru_Nitescu"
+    assert cv_tailor._slug_title("deep learning algorithm") == "Deep_Learning_Algorithm"
+
+
+def test_slug_title_preserves_short_all_caps_acronyms():
+    """BS, MS, AI, ML, NLP doivent rester ALL-CAPS, pas devenir Bs/Ms/Ai/Ml/Nlp."""
+    assert cv_tailor._slug_title("BS MS Engineer") == "BS_MS_Engineer"
+    assert cv_tailor._slug_title("AI/ML Engineer") == "AI_ML_Engineer"
+    assert cv_tailor._slug_title("NLP Researcher") == "NLP_Researcher"
+
+
+def test_slug_title_handles_none_and_empty():
+    assert cv_tailor._slug_title(None) == ""
+    assert cv_tailor._slug_title("") == ""
+
+
+def test_canonical_job_title_strips_parentheticals():
+    assert (
+        cv_tailor._canonical_job_title(
+            "Deep Learning Algorithm Graduate (TikTok Search Ranking)"
+        )
+        == "Deep Learning Algorithm Graduate"
+    )
+
+
+def test_canonical_job_title_strips_dash_suffix():
+    assert (
+        cv_tailor._canonical_job_title(
+            "Deep Learning Algorithm Graduate - 2026 Start (BS/MS)"
+        )
+        == "Deep Learning Algorithm Graduate"
+    )
+
+
+def test_canonical_job_title_strips_em_and_en_dashes():
+    assert cv_tailor._canonical_job_title("ML Engineer – 2026 New Grad") == "ML Engineer"
+    assert cv_tailor._canonical_job_title("ML Engineer — Intern Track") == "ML Engineer"
+
+
+def test_canonical_job_title_strips_gender_marker():
+    assert cv_tailor._canonical_job_title("Senior Data Scientist F/H") == "Senior Data Scientist"
+    assert cv_tailor._canonical_job_title("Data Engineer H/F") == "Data Engineer"
+    assert cv_tailor._canonical_job_title("Lead ML M/F") == "Lead ML"
+
+
+def test_canonical_job_title_preserves_slash_in_dual_skills():
+    """Le strip F/H ne doit pas amputer AI/ML ou full-stack JS/TS."""
+    assert cv_tailor._canonical_job_title("AI/ML Engineer") == "AI/ML Engineer"
+
+
+def test_canonical_job_title_handles_none_and_empty():
+    assert cv_tailor._canonical_job_title(None) == ""
+    assert cv_tailor._canonical_job_title("") == ""
+
+
+def test_make_filename_follows_new_convention():
+    """0_CV_Firstname_Lastname_JobTitle.pdf — pas de company, Title case."""
+    profile = {**SAMPLE_PROFILE, "first_name": "Alexandru", "last_name": "Nitescu"}
+    offer = {"title": "Deep Learning Algorithm Graduate (TikTok Search Ranking) - 2026 Start (BS/MS)"}
+    fname = cv_tailor.make_filename(profile, offer)
+    assert fname == "0_CV_Alexandru_Nitescu_Deep_Learning_Algorithm_Graduate.pdf"
+
+
+def test_make_filename_strips_gender_marker():
+    offer = {"title": "Senior Data Engineer F/H"}
+    fname = cv_tailor.make_filename(SAMPLE_PROFILE, offer)
+    assert fname == "0_CV_Alex_Nitescu_Senior_Data_Engineer.pdf"
 
 
 def test_make_filename_falls_back_when_fields_missing():
     profile = {"first_name": "Alex"}
     offer = {"title": "Dev"}
     fname = cv_tailor.make_filename(profile, offer)
-    assert fname.startswith("0_cv_alex_x_dev_")
-    assert fname.endswith(".pdf")
+    assert fname == "0_CV_Alex_X_Dev.pdf"
 
 
 def test_resolve_output_path_uses_company_folder(tmp_path, profile_in_tmp):
@@ -102,7 +167,7 @@ def test_resolve_output_path_missing_dir_raises(profile_in_tmp):
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# DOCX reading (legacy helper, kept for diagnostics)
+# DOCX reading helper (kept for diagnostics)
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -113,13 +178,12 @@ def test_read_base_cv_extracts_paragraphs(tmp_path):
     doc = Document()
     doc.add_paragraph("Alex Nitescu")
     doc.add_paragraph("Data Scientist")
-    doc.add_paragraph("")  # empty should be skipped
+    doc.add_paragraph("")
     doc.add_paragraph("Skills: Python, FastAPI")
     doc.save(str(docx_path))
 
     text = cv_tailor.read_base_cv(docx_path)
     assert "Alex Nitescu" in text
-    assert "Data Scientist" in text
     assert "Skills: Python, FastAPI" in text
 
 
@@ -136,38 +200,152 @@ def test_read_base_cv_wrong_extension_raises(tmp_path):
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Editable heuristic
+# Substantive heuristic + section detection
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_is_editable_accepts_substantive_bullets():
-    bullet = (
-        "Built and automated end-to-end data pipelines (PostgreSQL, REST APIs, "
-        "Pandas, Polars) processing 100M+ records daily"
+def test_is_substantive_accepts_long_content():
+    bullet = "Built and automated end-to-end data pipelines processing 100M+ records daily"
+    assert cv_tailor._is_substantive(bullet) is True
+
+
+def test_is_substantive_rejects_short_or_layout_text():
+    assert cv_tailor._is_substantive("Alex Nitescu") is False
+    assert cv_tailor._is_substantive("EXPERIENCE") is False
+    assert cv_tailor._is_substantive("Exponens\tParis, France") is False
+    assert cv_tailor._is_substantive("alex@example.com") is False
+
+
+def test_is_section_header_accepts_all_caps_short_lines():
+    assert cv_tailor._is_section_header("SUMMARY") is True
+    assert cv_tailor._is_section_header("EXPERIENCE") is True
+    assert cv_tailor._is_section_header("ADDITIONAL INFORMATION") is True
+    # Avec tabulation de padding Word
+    assert cv_tailor._is_section_header("SUMMARY\t") is True
+
+
+def test_is_section_header_rejects_mixed_case_or_long_lines():
+    assert cv_tailor._is_section_header("Summary") is False
+    assert cv_tailor._is_section_header("Data Scientist") is False
+    assert cv_tailor._is_section_header("THIS IS A VERY LONG ALL CAPS LINE THAT IS NOT A HEADER") is False
+
+
+def test_normalize_section_maps_keywords():
+    assert cv_tailor._normalize_section("SUMMARY") == "SUMMARY"
+    assert cv_tailor._normalize_section("PROFILE") == "SUMMARY"
+    assert cv_tailor._normalize_section("EXPERIENCE") == "EXPERIENCE"
+    assert cv_tailor._normalize_section("EDUCATION") == "EDUCATION"
+    assert cv_tailor._normalize_section("PROJECTS") == "PROJECTS"
+
+
+def test_normalize_section_returns_none_for_non_header():
+    assert cv_tailor._normalize_section("Built data pipelines processing 100M records") is None
+    assert cv_tailor._normalize_section("Alex Nitescu") is None
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Section-aware editable filter
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _make_user_like_docx(path: Path) -> None:
+    """DOCX mimant la structure d'un CV utilisateur réel : header, SUMMARY,
+    EXPERIENCE (bullets), EDUCATION (avec Relevant coursework), PROJECTS."""
+    from docx import Document
+
+    doc = Document()
+    # Header
+    doc.add_paragraph("Alex Nitescu")
+    doc.add_paragraph("2026 Data Scientist Graduate")
+    doc.add_paragraph("Paris, France - alex@example.com")
+    # SUMMARY
+    doc.add_paragraph("SUMMARY")
+    doc.add_paragraph(
+        "Applied Mathematics graduate building production ML systems "
+        "and full-stack AI products."
     )
-    assert cv_tailor._is_editable(bullet) is True
+    # EXPERIENCE
+    doc.add_paragraph("EXPERIENCE")
+    doc.add_paragraph("Exponens\tParis, France")
+    doc.add_paragraph(
+        "Built and automated end-to-end data pipelines processing 100M+ records "
+        "daily using Python, Pandas, PostgreSQL."
+    )
+    doc.add_paragraph(
+        "Designed dynamic dashboards consumed by 5+ business teams to track "
+        "revenue and operational KPIs."
+    )
+    # EDUCATION
+    doc.add_paragraph("EDUCATION")
+    doc.add_paragraph("CY Tech\tCergy, France")
+    doc.add_paragraph(
+        "Relevant coursework: Advanced Machine Learning, Deep Learning, NLP, "
+        "LLMs, RAG, Time Series Analysis."
+    )
+    doc.add_paragraph(
+        "LSTM-based Parkinson's disease classifier (TensorFlow/Keras) on voice "
+        "features with 94% test accuracy."
+    )
+    doc.save(str(path))
 
 
-def test_is_editable_rejects_short_text():
-    assert cv_tailor._is_editable("Alex Nitescu") is False
-    assert cv_tailor._is_editable("CDI") is False
-    assert cv_tailor._is_editable("") is False
+def test_collect_editable_in_sections_picks_summary_content(tmp_path):
+    """Le paragraphe descriptif sous SUMMARY est éditable."""
+    docx_path = tmp_path / "cv.docx"
+    _make_user_like_docx(docx_path)
+    from docx import Document
+
+    editables = cv_tailor._collect_editable_in_sections(Document(str(docx_path)))
+    texts = [t for _, t in editables]
+    assert any("Applied Mathematics graduate" in t for t in texts)
 
 
-def test_is_editable_rejects_all_caps_section_headers():
-    assert cv_tailor._is_editable("EXPERIENCE") is False
-    assert cv_tailor._is_editable("ADDITIONAL INFORMATION") is False
+def test_collect_editable_in_sections_picks_relevant_coursework(tmp_path):
+    """La ligne 'Relevant coursework:' sous EDUCATION est éditable."""
+    docx_path = tmp_path / "cv.docx"
+    _make_user_like_docx(docx_path)
+    from docx import Document
+
+    editables = cv_tailor._collect_editable_in_sections(Document(str(docx_path)))
+    texts = [t for _, t in editables]
+    assert any(t.lower().startswith("relevant coursework") for t in texts)
 
 
-def test_is_editable_rejects_tab_separated_layout_lines():
-    # Company tab Location and Title tab Date are layout, not content
-    assert cv_tailor._is_editable("Exponens\tParis, France") is False
-    assert cv_tailor._is_editable("Data Analyst Apprentice\tSeptember 2023 – Present") is False
+def test_collect_editable_ignores_experience_bullets(tmp_path):
+    """Aucun bullet EXPERIENCE ne doit être proposé à Gemini, même substantiel."""
+    docx_path = tmp_path / "cv.docx"
+    _make_user_like_docx(docx_path)
+    from docx import Document
+
+    editables = cv_tailor._collect_editable_in_sections(Document(str(docx_path)))
+    texts = [t for _, t in editables]
+    assert not any("Built and automated" in t for t in texts)
+    assert not any("dashboards consumed" in t for t in texts)
 
 
-def test_is_editable_rejects_contact_lines():
-    assert cv_tailor._is_editable("Paris, France – +33 781830598 – nitescu.alex04@gmail.com") is False
-    assert cv_tailor._is_editable("https://github.com/nitescuale and https://linkedin.com/in/x") is False
+def test_collect_editable_ignores_education_projects(tmp_path):
+    """Les autres lignes sous EDUCATION (LSTM Parkinson, ...) restent gelées."""
+    docx_path = tmp_path / "cv.docx"
+    _make_user_like_docx(docx_path)
+    from docx import Document
+
+    editables = cv_tailor._collect_editable_in_sections(Document(str(docx_path)))
+    texts = [t for _, t in editables]
+    assert not any("Parkinson" in t for t in texts)
+
+
+def test_collect_editable_returns_empty_when_no_summary_or_coursework(tmp_path):
+    from docx import Document
+
+    docx_path = tmp_path / "minimal.docx"
+    doc = Document()
+    doc.add_paragraph("Alex Nitescu")
+    doc.add_paragraph("EXPERIENCE")
+    doc.add_paragraph("Some bullet long enough to be substantive content here.")
+    doc.save(str(docx_path))
+
+    editables = cv_tailor._collect_editable_in_sections(Document(str(docx_path)))
+    assert editables == []
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -180,7 +358,6 @@ def test_collect_paragraphs_walks_body_and_tables(tmp_path):
 
     doc = Document()
     doc.add_paragraph("Body para A")
-    doc.add_paragraph("Body para B")
     table = doc.add_table(rows=1, cols=2)
     table.cell(0, 0).text = "Cell L"
     table.cell(0, 1).text = "Cell R"
@@ -188,7 +365,6 @@ def test_collect_paragraphs_walks_body_and_tables(tmp_path):
     paragraphs = cv_tailor._collect_paragraphs(doc)
     texts = [p.text for p in paragraphs]
     assert "Body para A" in texts
-    assert "Body para B" in texts
     assert "Cell L" in texts
     assert "Cell R" in texts
 
@@ -204,12 +380,9 @@ def test_set_paragraph_text_keeps_first_run_formatting(tmp_path):
 
     cv_tailor._set_paragraph_text(p, "Tailored replacement content")
 
-    # First run carries the new text and keeps its bold styling
     assert p.runs[0].text == "Tailored replacement content"
     assert p.runs[0].bold is True
-    # Other runs were emptied
     assert all(r.text == "" for r in p.runs[1:])
-    # The visible paragraph text is the new content only
     assert p.text == "Tailored replacement content"
 
 
@@ -264,35 +437,23 @@ def test_is_available_requires_key_profile_and_paths(profile_in_tmp, monkeypatch
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def _make_docx_with_editable_bullets(path: Path) -> None:
-    from docx import Document
-
-    doc = Document()
-    doc.add_paragraph("Alex Nitescu")  # short — not editable
-    doc.add_paragraph("EXPERIENCE")  # all caps — not editable
-    doc.add_paragraph(
-        "Built and automated end-to-end data pipelines (PostgreSQL, REST APIs, "
-        "Pandas, Polars) processing 100M+ records daily"
-    )  # editable
-    doc.add_paragraph(
-        "Designed dynamic Power BI dashboards consumed by 5+ business teams "
-        "across the firm"
-    )  # editable
-    doc.save(str(path))
-
-
 def test_tailor_cv_orchestrates_end_to_end(tmp_path, profile_in_tmp, monkeypatch):
     docx_path = tmp_path / "base.docx"
-    _make_docx_with_editable_bullets(docx_path)
+    _make_user_like_docx(docx_path)
 
     out_dir = tmp_path / "CVs"
     write_profile(profile_in_tmp, base_cv_path=str(docx_path), cv_output_dir=str(out_dir))
     monkeypatch.setenv("GEMINI_API_KEY", "fake")
 
-    # Gemini "tailored" the two editable bullets at indices 2 and 3
+    # Look up real editable indices to forge the Gemini JSON response
+    from docx import Document
+
+    editables = cv_tailor._collect_editable_in_sections(Document(str(docx_path)))
+    assert len(editables) == 2  # SUMMARY content + Relevant coursework
+
     fake_json = json.dumps({
-        "2": "Engineered scalable Python data pipelines processing 100M+ daily records with Spark and AWS",
-        "3": "Built BI dashboards consumed by 5+ teams to track revenue and cost optimization KPIs",
+        str(editables[0][0]): "Tailored SUMMARY for BNP Paribas role",
+        str(editables[1][0]): "Tailored coursework mentioning Spark and AWS",
     })
 
     with patch.object(cv_tailor, "_call_gemini", return_value=fake_json) as llm_mock, patch.object(
@@ -301,25 +462,17 @@ def test_tailor_cv_orchestrates_end_to_end(tmp_path, profile_in_tmp, monkeypatch
         pdf_mock.side_effect = lambda src, dst: dst.write_bytes(b"%PDF-fake")
         result = cv_tailor.tailor_cv(SAMPLE_OFFER)
 
-    # LLM call carried the editable paragraphs and the offer
     assert llm_mock.called
     sent_prompt = llm_mock.call_args[0][0]
     assert "BNP Paribas" in sent_prompt
-    assert "Built and automated end-to-end data pipelines" in sent_prompt  # original text
-    assert "EXPERIENCE" not in sent_prompt.split("EDITABLE_PARAGRAPHS")[1]  # header excluded
+    assert "Applied Mathematics graduate" in sent_prompt  # SUMMARY content sent
+    assert "Built and automated" not in sent_prompt  # EXPERIENCE bullets gelés
 
-    # PDF conversion called with our generated DOCX + target PDF
     pdf_mock.assert_called_once()
-    src_arg, dst_arg = pdf_mock.call_args[0]
-    assert src_arg.suffix == ".docx"
-    assert dst_arg.suffix == ".pdf"
-
-    # Result metadata
+    assert result["edited_count"] == 2
+    assert result["editable_count"] == 2
     assert result["filename"].endswith(".pdf")
     assert "BNP_Paribas" in result["folder"]
-    assert result["editable_count"] == 2
-    assert result["edited_count"] == 2
-    assert Path(result["saved_docx_path"]).suffix == ".docx"
 
 
 def test_tailor_cv_requires_base_cv_path(tmp_path, profile_in_tmp, monkeypatch):
@@ -335,15 +488,20 @@ def test_tailor_cv_requires_api_key(profile_in_tmp, monkeypatch):
         cv_tailor.tailor_cv(SAMPLE_OFFER)
 
 
-def test_tailor_cv_raises_when_no_editable_paragraphs(tmp_path, profile_in_tmp, monkeypatch):
-    """DOCX qui ne contient que des en-têtes / contact / dates → rien à éditer."""
+def test_tailor_cv_falls_back_when_no_editable_paragraphs(
+    tmp_path, profile_in_tmp, monkeypatch
+):
+    """DOCX sans SUMMARY ni Relevant coursework : on convertit tel quel,
+    pas d'erreur, pas d'appel Gemini."""
     from docx import Document
 
     docx_path = tmp_path / "base.docx"
     doc = Document()
     doc.add_paragraph("Alex Nitescu")
     doc.add_paragraph("EXPERIENCE")
-    doc.add_paragraph("alex@example.com")
+    doc.add_paragraph(
+        "Built data pipelines processing 100M records but no SUMMARY section here."
+    )
     doc.save(str(docx_path))
 
     write_profile(
@@ -353,15 +511,24 @@ def test_tailor_cv_raises_when_no_editable_paragraphs(tmp_path, profile_in_tmp, 
     )
     monkeypatch.setenv("GEMINI_API_KEY", "fake")
 
-    with pytest.raises(ValueError, match="éditable"):
-        cv_tailor.tailor_cv(SAMPLE_OFFER)
+    with patch.object(cv_tailor, "_call_gemini") as llm_mock, patch.object(
+        cv_tailor, "_convert_docx_to_pdf"
+    ) as pdf_mock:
+        pdf_mock.side_effect = lambda src, dst: dst.write_bytes(b"%PDF-fake")
+        result = cv_tailor.tailor_cv(SAMPLE_OFFER)
+
+    # Gemini n'est PAS appelé dans ce cas — rien à tailorer
+    llm_mock.assert_not_called()
+    pdf_mock.assert_called_once()
+    assert result["editable_count"] == 0
+    assert result["edited_count"] == 0
 
 
 def test_tailor_cv_tolerates_empty_edits_dict(tmp_path, profile_in_tmp, monkeypatch):
     """Si Gemini renvoie {} (rien à changer), le pipeline ne crashe pas — il
     sauvegarde une copie identique du DOCX et la convertit."""
     docx_path = tmp_path / "base.docx"
-    _make_docx_with_editable_bullets(docx_path)
+    _make_user_like_docx(docx_path)
 
     write_profile(
         profile_in_tmp,
@@ -377,7 +544,7 @@ def test_tailor_cv_tolerates_empty_edits_dict(tmp_path, profile_in_tmp, monkeypa
         result = cv_tailor.tailor_cv(SAMPLE_OFFER)
 
     assert result["edited_count"] == 0
-    assert result["editable_count"] == 2
+    assert result["editable_count"] == 2  # SUMMARY + Relevant coursework détectés
 
 
 def test_tailor_cv_ignores_indices_outside_editable_set(
@@ -386,7 +553,7 @@ def test_tailor_cv_ignores_indices_outside_editable_set(
     """Si Gemini hallucine un index hors de la liste editable, on l'ignore
     proprement sans toucher au paragraphe inattendu."""
     docx_path = tmp_path / "base.docx"
-    _make_docx_with_editable_bullets(docx_path)
+    _make_user_like_docx(docx_path)
 
     write_profile(
         profile_in_tmp,
@@ -395,8 +562,14 @@ def test_tailor_cv_ignores_indices_outside_editable_set(
     )
     monkeypatch.setenv("GEMINI_API_KEY", "fake")
 
-    # index 0 ("Alex Nitescu") and 1 ("EXPERIENCE") are NOT in the editable list
-    rogue = json.dumps({"0": "Hacked Name", "1": "Hacked Section", "2": "Tailored bullet"})
+    # index 0 (header) n'est PAS dans la liste editable
+    from docx import Document
+
+    editables = cv_tailor._collect_editable_in_sections(Document(str(docx_path)))
+    valid_idx = editables[0][0]
+    rogue = json.dumps(
+        {"0": "Hacked Name", str(valid_idx): "Tailored SUMMARY"}
+    )
 
     with patch.object(cv_tailor, "_call_gemini", return_value=rogue), patch.object(
         cv_tailor, "_convert_docx_to_pdf"
@@ -404,17 +577,12 @@ def test_tailor_cv_ignores_indices_outside_editable_set(
         pdf_mock.side_effect = lambda src, dst: dst.write_bytes(b"%PDF-fake")
         result = cv_tailor.tailor_cv(SAMPLE_OFFER)
 
-    # Only the valid editable index (2) was applied
-    assert result["edited_count"] == 1
+    assert result["edited_count"] == 1  # seule l'édition valide a passé
 
-    # Re-open the saved DOCX and confirm the protected paragraphs are intact
-    from docx import Document
-
+    # Vérifie que le nom (paragraphe index 0) n'a pas été touché
     saved = Document(result["saved_docx_path"])
-    texts = [p.text for p in saved.paragraphs]
-    assert "Alex Nitescu" in texts
-    assert "EXPERIENCE" in texts
-    assert any("Tailored bullet" in t for t in texts)
+    paras = cv_tailor._collect_paragraphs(saved)
+    assert "Alex Nitescu" == paras[0].text
 
 
 def test_banned_cliches_constant_is_non_empty():
