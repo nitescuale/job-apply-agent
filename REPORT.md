@@ -1,6 +1,101 @@
 # REPORT.md — Job Apply Agent MVP
 
+## 2026-06-23 — SQLite tracking + cache scrape-job
+
+### Implémenté
+
+- **`backend/store.py`** — module DB autonome, sqlite3 stdlib (pas
+  d'ORM, pas d'Alembic). `init_db()` idempotent via CREATE TABLE IF
+  NOT EXISTS, chemin configurable via `DB_PATH` (.env), défaut
+  `backend/data/applications.db`. Connexion open-close par appel via
+  un contextmanager, `sqlite3.Row` row_factory pour l'accès par nom.
+  Schéma deux tables :
+  - `applications(id, job_url, job_hash UNIQUE, company, title,
+    location, contract_type, status, match_score, cv_path,
+    cover_letter_path, notes, created_at, updated_at)` + index sur
+    status, company, created_at.
+  - `scrapes(job_hash PK, essentials_json, created_at)` — cache des
+    résultats de /scrape-job pour économiser des appels Gemini.
+- **`compute_job_hash`** — sha256 d'un canonical normalisé
+  `title|company|location` avec NFKD + drop accents + collapse espaces
+  + lowercase. Garantit que `L'Oréal` et `L'Oreal` dédupliquent
+  correctement.
+- **`upsert_application`** — INSERT si nouveau (status='seen'),
+  UPDATE par COALESCE des champs scraping sinon. Le status manuel
+  (applied, interview, etc.) est PRÉSERVÉ entre re-scrapes — un
+  re-scrape ne repasse pas une application 'applied' à 'seen'.
+  Retourne `(id, was_new)` pour le badge popup.
+- **`/scrape-job` modifié** : calcule le hash post-scraping structurel,
+  check du cache → court-circuit Gemini si hit (flag `from_cache: true`),
+  sinon Gemini puis save_scrape_cache. Dans tous les cas upsert
+  l'application et renvoie `{application_id, seen_before,
+  application_status}` pour le badge.
+- **`/tailor-cv` modifié** : compute_job_hash sur l'offre, find/create
+  l'application, écrit `cv_path = saved_path` du PDF tailoré. Le user
+  peut tracer quel CV a été généré pour quelle candidature.
+- **Nouveaux endpoints** :
+  - `GET /applications?status=&company=&since=&until=` — filtres
+    optionnels (company en LIKE %x%, dates ISO 8601), tri created_at
+    DESC.
+  - `GET /applications/{id}` — 404 si absent.
+  - `PATCH /applications/{id}` — status et/ou notes. 422 si status
+    hors VALID_STATUSES, 404 si id absent.
+- **Lifespan FastAPI** : `store.init_db()` exécuté au startup via
+  `@asynccontextmanager` — la DB et les tables sont garanties prêtes
+  avant le premier handler.
+- **Popup.tsx** : `OfferResult` étendu avec `application_id`,
+  `seen_before`, `application_status`, `from_cache`. Badge sobre
+  affiché à droite du tag LLM dans l'état ready :
+  - `seen_before && status === 'seen'` → badge muted "Déjà vu"
+  - `seen_before && status !== 'seen'` → badge accent vert avec
+    label (Déjà postulé / Relancée / Entretien / Réponse positive /
+    Réponse négative).
+- **Tests** : `tests/test_store.py` — 25 tests couvrant init
+  idempotent, hash déterministe / normalisation accents / dédup,
+  upsert création/update/préservation status, COALESCE qui n'écrase
+  pas avec None, get_application(_by_hash), list filtres status /
+  company LIKE / date range, update PATCH partiel, validation status,
+  noop sans patch, cache miss/hit/upsert/unicode payload. Suite
+  totale : 80 verts.
+- **`.gitignore`** : `backend/data/*.db` + `*.db-journal` (la DB
+  applications.db ne doit jamais être commit).
+
+### Décisions
+
+- **Hash sur les champs structurels (pré-LLM)** plutôt que post-LLM :
+  garantit la convergence cache lookup ↔ cache write sur les visites
+  suivantes (sinon le LLM pourrait modifier title/company et générer
+  un hash différent → cache miss systématique).
+- **COALESCE en UPDATE** : on ne wipe pas une valeur connue avec NULL
+  si le re-scrape rate un champ (e.g. l'utilisateur revoit la même
+  offre depuis une page condensée qui n'expose plus la location).
+- **`status` validé en Python**, pas en CHECK constraint SQL :
+  permet d'ajouter un statut au tuple `VALID_STATUSES` sans migration
+  de schéma.
+- **Open-close par requête** : `_conn()` ouvre + ferme à chaque
+  appel via contextmanager. sqlite3 supporte parfaitement ce pattern
+  pour des charges légères, et ça évite tous les soucis de partage
+  de connexion entre threads de l'executor uvicorn.
+- **Badge sobre, pas de vue lourde** (per roadmap) : un simple tag
+  Atelier dans l'état ready suffit à signaler la réoccurrence et
+  l'avancement. Une vue dédiée "kanban des candidatures" pourra
+  arriver plus tard si le besoin est confirmé.
+
+### Blocages
+
+Aucun. Les anciens tests cv_tailor (déjà adaptés au pipeline
+DOCX-template lors d'une session précédente) restent intacts. Aucun
+warning DeprecationWarning ajouté.
+
+---
+
 ## 2026-06-09 — Tailored summary in CV pipeline
+
+> **⚠ Superseded — historique uniquement.** La passe SUMMARY séparée
+> a été retirée lors du refactor vers le pipeline DOCX-template
+> (cv_tailor.py édite désormais en place le DOCX source de l'user au
+> lieu de reconstruire un Markdown). Le summary, s'il existe dans le
+> DOCX, est tailoré comme n'importe quel autre paragraphe éditable.
 
 ### Implémenté
 

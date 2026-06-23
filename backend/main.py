@@ -3,6 +3,7 @@ import logging
 import os
 import subprocess
 import sys
+from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from backend.agents.job_scraper import scrape_job  # noqa: E402
 from backend.agents import llm_extractor  # noqa: E402
 from backend.agents import form_filler  # noqa: E402
 from backend.agents import cv_tailor  # noqa: E402
+from backend import store  # noqa: E402
 
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
@@ -30,7 +32,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Job Apply Agent API")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Init de la DB SQLite au démarrage. Idempotent (CREATE IF NOT EXISTS)."""
+    store.init_db()
+    yield
+
+
+app = FastAPI(title="Job Apply Agent API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,6 +66,11 @@ class TailorCvRequest(BaseModel):
 
 class OpenFileRequest(BaseModel):
     path: str
+
+
+class ApplicationPatch(BaseModel):
+    status: str | None = None
+    notes: str | None = None
 
 
 @app.get("/health")
@@ -115,8 +129,10 @@ async def tailor_cv_endpoint(request: TailorCvRequest):
         {"saved_path", "filename", "folder", "markdown"} — le markdown est
         inclus pour permettre une preview côté popup avant ouverture du PDF.
     """
-    company = (request.offer or {}).get("company")
-    title = (request.offer or {}).get("title")
+    offer = request.offer or {}
+    company = offer.get("company")
+    title = offer.get("title")
+    location = offer.get("location")
     logger.info("POST /tailor-cv — title=%r company=%r", title, company)
     loop = asyncio.get_running_loop()
     try:
@@ -124,6 +140,18 @@ async def tailor_cv_endpoint(request: TailorCvRequest):
             loop.run_in_executor(None, cv_tailor.tailor_cv, request.offer),
             timeout=60.0,
         )
+        # Écrit cv_path dans l'application correspondante (créée par
+        # /scrape-job). Si elle n'existe pas encore — l'user a tailoré sans
+        # passer par /scrape-job — on l'upsert au passage.
+        job_hash = store.compute_job_hash(title, company, location)
+        row = store.get_application_by_hash(job_hash)
+        if row is None:
+            app_id, _ = store.upsert_application(
+                job_hash, company=company, title=title, location=location,
+            )
+        else:
+            app_id = row["id"]
+        store.update_application(app_id, cv_path=result.get("saved_path"))
         return result
     except FileNotFoundError as exc:
         logger.error("tailor-cv: ressource absente — %s", exc)
@@ -197,19 +225,20 @@ async def open_file_endpoint(request: OpenFileRequest):
 
 @app.post("/scrape-job")
 async def scrape_job_endpoint(request: ScrapeRequest):
-    """Extrait les infos d'une offre depuis le HTML, puis les affine via Gemini.
+    """Extrait les infos d'une offre, court-circuite via cache si déjà vue.
 
     Pipeline :
         1. scrape_job — extraction structurelle (JSON-LD, meta, fallback texte)
-        2. llm_extractor — moulinette Gemini qui filtre le bruit et structure
-           l'essentiel (skills, missions, résumé). Étape ignorée si pas de clé API.
-
-    Args:
-        request: Body JSON contenant job_url et job_html
+        2. compute_job_hash sur title|company|location normalisés
+        3. cache hit -> renvoie les essentials stockés avec `from_cache: true`,
+           pas d'appel LLM
+        4. cache miss -> llm_extractor (si dispo), écrit dans le cache,
+           upsert l'application avec status='seen'
+        5. dans tous les cas, renvoie {application_id, seen_before,
+           application_status} pour le badge de la popup
 
     Returns:
-        dict fusionnant le scraping brut et les champs nettoyés par le LLM,
-        plus un flag `llm_used`.
+        dict avec les essentials de l'offre + flags de tracking.
     """
     logger.info("POST /scrape-job — url=%s html_size=%d", request.job_url, len(request.job_html))
     loop = asyncio.get_running_loop()
@@ -230,10 +259,38 @@ async def scrape_job_endpoint(request: ScrapeRequest):
         logger.exception("scrape-job: scraping error")
         raise HTTPException(status_code=500, detail=f"Scraping error: {exc}")
 
+    # 2. Hash canonical à partir des champs structurels (pré-LLM). On utilise
+    #    toujours le même hash en lecture et en écriture pour que la dédup
+    #    et le cache convergent sur une nouvelle visite.
+    job_hash = store.compute_job_hash(
+        scraped.get("title"), scraped.get("company"), scraped.get("location"),
+    )
+
+    # 3. Cache hit -> on saute Gemini
+    cached = store.get_cached_scrape(job_hash)
+    if cached is not None:
+        logger.info("scrape-job: cache hit pour %s", job_hash[:12])
+        app_id, was_new = store.upsert_application(
+            job_hash,
+            job_url=request.job_url,
+            company=cached.get("company"),
+            title=cached.get("title"),
+            location=cached.get("location"),
+            contract_type=cached.get("contract_type"),
+        )
+        row = store.get_application(app_id) or {}
+        result = dict(cached)
+        result["url"] = request.job_url
+        result["from_cache"] = True
+        result["application_id"] = app_id
+        result["seen_before"] = not was_new
+        result["application_status"] = row.get("status", "seen")
+        return result
+
+    # 4. Cache miss -> on construit le résultat, on appelle Gemini si dispo
     result: dict = dict(scraped)
     result["llm_used"] = False
 
-    # 2. Moulinette LLM (optionnelle — dégrade proprement si indisponible)
     if llm_extractor.is_available():
         try:
             essentials = await asyncio.wait_for(
@@ -251,10 +308,70 @@ async def scrape_job_endpoint(request: ScrapeRequest):
     else:
         logger.info("scrape-job: GEMINI_API_KEY absente, étape LLM ignorée")
 
-    # Réaffirme l'URL après le merge LLM : protège contre une éventuelle
-    # surcharge (la passe Gemini ne devrait pas renvoyer 'url', mais on
-    # garantit ici que la popup peut toujours ouvrir l'offre d'origine
-    # et que le pipeline cv_tailor reçoit bien l'URL.)
+    # 5. Réaffirme l'URL (défense contre un éventuel override Gemini)
     result["url"] = request.job_url
 
+    # 6. Cache + upsert tracking
+    store.save_scrape_cache(job_hash, result)
+    app_id, was_new = store.upsert_application(
+        job_hash,
+        job_url=request.job_url,
+        company=result.get("company"),
+        title=result.get("title"),
+        location=result.get("location"),
+        contract_type=result.get("contract_type"),
+    )
+    row = store.get_application(app_id) or {}
+    result["from_cache"] = False
+    result["application_id"] = app_id
+    result["seen_before"] = not was_new
+    result["application_status"] = row.get("status", "seen")
+
     return result
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Applications tracking
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@app.get("/applications")
+async def list_applications_endpoint(
+    status: str | None = None,
+    company: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+):
+    """Liste les candidatures avec filtres optionnels.
+
+    - `status` : exact (seen, applied, followed_up, interview, response_pos, response_neg)
+    - `company` : sous-chaîne (LIKE %company%)
+    - `since` / `until` : bornes ISO 8601 sur created_at
+    """
+    return store.list_applications(
+        status=status, company=company, since=since, until=until,
+    )
+
+
+@app.get("/applications/{application_id}")
+async def get_application_endpoint(application_id: int):
+    row = store.get_application(application_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Application introuvable")
+    return row
+
+
+@app.patch("/applications/{application_id}")
+async def patch_application_endpoint(application_id: int, patch: ApplicationPatch):
+    """Met à jour status et/ou notes. Validation du status côté store."""
+    try:
+        row = store.update_application(
+            application_id,
+            status=patch.status,
+            notes=patch.notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if not row:
+        raise HTTPException(status_code=404, detail="Application introuvable")
+    return row

@@ -38,7 +38,21 @@ interface OfferResult {
   summary?: string
   llm_used?: boolean
   llm_error?: string
+  // tracking — alimentés par le store SQLite côté backend
+  application_id?: number
+  seen_before?: boolean
+  application_status?: string
+  from_cache?: boolean
   [key: string]: unknown
+}
+
+const STATUS_LABELS: Record<string, string> = {
+  seen: 'Déjà vu',
+  applied: 'Déjà postulé',
+  followed_up: 'Relancée',
+  interview: 'Entretien',
+  response_pos: 'Réponse positive',
+  response_neg: 'Réponse négative',
 }
 
 interface FillReport {
@@ -202,6 +216,28 @@ const STYLES = `
   .ja-tag.muted {
     color: var(--mut);
     background: #f0f0ea;
+  }
+  .ja-badge-status {
+    display: inline-flex;
+    align-items: center;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    padding: 5px 10px;
+    border-radius: 7px;
+    margin-bottom: 16px;
+    margin-left: 8px;
+    border: 1px solid transparent;
+  }
+  .ja-badge-status.seen {
+    color: var(--mut);
+    background: var(--pan);
+    border-color: var(--line);
+  }
+  .ja-badge-status.progressed {
+    color: var(--ac);
+    background: var(--ac-soft);
+    border-color: transparent;
   }
   .ja-company {
     display: flex;
@@ -995,6 +1031,15 @@ export default function Popup() {
             </span>
           ) : (
             <span className="ja-tag muted">scraping brut</span>
+          )}
+          {r.seen_before && r.application_status && (
+            <span
+              className={`ja-badge-status ${
+                r.application_status === 'seen' ? 'seen' : 'progressed'
+              }`}
+            >
+              {STATUS_LABELS[r.application_status] || r.application_status}
+            </span>
           )}
 
           {(r.company || r.location) && (
