@@ -407,20 +407,43 @@ def _build_prompt(
     editables: list[tuple[int, str]],
     offer: dict[str, Any],
     profile: dict[str, Any],
+    match: dict[str, Any] | None = None,
 ) -> str:
-    """Construit le prompt avec les paragraphes numérotés à tailorer."""
+    """Construit le prompt avec les paragraphes numérotés à tailorer.
+
+    Si `match` est fourni (provenant de /match-score), on injecte un bloc
+    MATCH qui liste les matched_skills (à mettre en valeur quand le profil
+    les supporte déjà) et les missing_skills (à ne PAS inventer — on les
+    indique pour que Gemini ne sur-promette pas dessus). Aucune injection
+    si match=None : appel rétrocompatible.
+    """
     offer_compact = {
         k: v
         for k, v in offer.items()
         if v and k not in ("description", "url")
     }
     paragraphs_block = "\n".join(f"{idx}: {text}" for idx, text in editables)
-    return (
-        f"{_SYSTEM}\n\n"
-        f"--- OFFER ---\n{json.dumps(offer_compact, ensure_ascii=False, indent=2)}\n\n"
-        f"--- PROFILE ---\n{json.dumps(profile, ensure_ascii=False, indent=2)}\n\n"
-        f"--- EDITABLE_PARAGRAPHS ---\n{paragraphs_block}\n"
-    )
+    parts = [
+        _SYSTEM,
+        f"--- OFFER ---\n{json.dumps(offer_compact, ensure_ascii=False, indent=2)}",
+        f"--- PROFILE ---\n{json.dumps(profile, ensure_ascii=False, indent=2)}",
+    ]
+    if match:
+        matched = list(match.get("matched_skills") or [])
+        missing = list(match.get("missing_skills") or [])
+        match_block = {
+            "matched_skills_emphasize_truthfully": matched,
+            "missing_skills_do_not_claim_present": missing,
+        }
+        parts.append(
+            "--- MATCH ---\n"
+            "Use this to orient phrasing. Mirror matched skills when the "
+            "original paragraph already supports them. Never claim a missing "
+            "skill is present.\n"
+            f"{json.dumps(match_block, ensure_ascii=False, indent=2)}"
+        )
+    parts.append(f"--- EDITABLE_PARAGRAPHS ---\n{paragraphs_block}")
+    return "\n\n".join(parts) + "\n"
 
 
 def _parse_edits(raw: str) -> dict[int, str]:
@@ -516,11 +539,16 @@ def _convert_docx_to_pdf(docx_path: Path, pdf_path: Path) -> None:
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def tailor_cv(offer: dict[str, Any]) -> dict[str, Any]:
+def tailor_cv(
+    offer: dict[str, Any],
+    match: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Édite en place les paragraphes éditables du DOCX base et exporte en PDF.
 
     Args:
         offer: champs structurés de l'offre (title, company, skills, ...).
+        match: optionnel — {matched_skills, missing_skills} de /match-score.
+            Injecté dans le prompt pour orienter Gemini sans inventer.
 
     Returns:
         {
@@ -590,7 +618,7 @@ def tailor_cv(offer: dict[str, Any]) -> dict[str, Any]:
     logger.info("cv_tailor: %d paragraphes éditables détectés", len(editables))
 
     # 3. Demander à Gemini les versions tailorées
-    prompt = _build_prompt(editables, offer, profile)
+    prompt = _build_prompt(editables, offer, profile, match)
     raw = _call_gemini(prompt)
     edits = _parse_edits(raw)
     logger.info("cv_tailor: %d éditions reçues sur %d demandées", len(edits), len(editables))

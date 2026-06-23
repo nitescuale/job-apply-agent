@@ -8,9 +8,11 @@
  * la prochaine ouverture.
  *
  * Messages écoutés :
- *  - START_ANALYZE   { tabId }
- *  - START_TAILOR_CV { offer }
- *  - START_FILL_FORM { tabId, context? }
+ *  - START_ANALYZE       { tabId }
+ *  - START_TAILOR_CV     { offer }
+ *  - START_FILL_FORM     { tabId, context? }
+ *  - PATCH_APPLICATION   { applicationId, patch: { status?, notes? } }
+ *  - OPEN_TRACKER        — ouvre tracker.html dans un nouvel onglet
  *  - RESET_STATE
  *
  * Schéma de chrome.storage.local[STORAGE_KEY] :
@@ -20,15 +22,32 @@
 
 const BACKEND_URL = 'http://localhost:8000'
 const STORAGE_KEY = 'job-apply-popup-state'
+const TRACKER_URL = 'src/tracker/index.html'
 
 type Status =
   | 'idle' | 'scraping' | 'ready' | 'applying' | 'applied' | 'error' | 'apply-error'
 
 type CvState = 'idle' | 'generating' | 'done' | 'error'
 
+interface MatchResult {
+  score: number
+  matched_skills: string[]
+  missing_skills: string[]
+  rationale: string
+  llm_used: boolean
+}
+
+interface OfferResult {
+  application_id?: number
+  application_status?: string
+  seen_before?: boolean
+  match?: MatchResult | null
+  [key: string]: unknown
+}
+
 interface State {
   status: Status
-  result: Record<string, unknown> | null
+  result: OfferResult | null
   error: string
   applyError: string
   fillReport: { filled: string[]; skipped: { id: string; reason: string }[] } | null
@@ -68,6 +87,47 @@ function friendlyFetchError(err: unknown): string {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// Tracking — PATCH /applications/{id}
+// ──────────────────────────────────────────────────────────────────────────
+
+interface ApplicationRow {
+  id: number
+  status: string
+  notes?: string | null
+  [key: string]: unknown
+}
+
+async function patchApplication(
+  applicationId: number,
+  patch: { status?: string; notes?: string },
+): Promise<ApplicationRow> {
+  const res = await fetch(`${BACKEND_URL}/applications/${applicationId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+  if (!res.ok) {
+    const txt = await res.text()
+    throw new Error(`Backend ${res.status} — ${txt.slice(0, 180)}`)
+  }
+  return res.json()
+}
+
+/**
+ * Si le storage courant reflète cette même application, met à jour
+ * `result.application_status` pour que le badge du popup change live (via
+ * onChanged). Si l'application affichée est différente — on no-op.
+ */
+async function reflectStatusInStorage(applicationId: number, status: string): Promise<void> {
+  const cur = await getState()
+  const r = cur.result
+  if (!r || r.application_id !== applicationId) return
+  await setState({
+    result: { ...r, application_status: status, seen_before: true },
+  })
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Pipelines
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -93,6 +153,38 @@ async function runAnalyze(tabId: number): Promise<void> {
     }
     const data = await r.json()
     await setState({ status: 'ready', result: data, error: '', inflight: null })
+
+    // Étape 2 (en parallèle conceptuel — sériel pour rester simple) :
+    // score de pertinence. On l'attache à `result.match` pour que le popup
+    // l'affiche dès qu'il arrive. Erreur silencieuse en console — la jauge
+    // reste cachée plutôt que de planter l'analyse principale.
+    try {
+      const offerForMatch = {
+        title: data.title,
+        company: data.company,
+        location: data.location,
+        contract_type: data.contract_type,
+        experience_level: data.experience_level,
+        skills: data.skills,
+        missions: data.missions,
+        summary: data.summary,
+      }
+      const mr = await fetch(`${BACKEND_URL}/match-score`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ offer: offerForMatch }),
+      })
+      if (mr.ok) {
+        const match = await mr.json()
+        const cur = await getState()
+        const curResult = cur.result
+        if (curResult) {
+          await setState({ result: { ...curResult, match } })
+        }
+      }
+    } catch (err) {
+      console.warn('match-score auto-trigger a échoué :', err)
+    }
   } catch (err) {
     await setState({
       status: 'error',
@@ -109,10 +201,16 @@ async function runTailorCv(offer: Record<string, unknown>): Promise<void> {
     inflight: { kind: 'tailor', started_at: Date.now() },
   })
   try {
+    // Si on a déjà un match attaché à l'offre courante (storage), on
+    // le forward au backend pour orienter le tailoring sans inventer
+    // les missing_skills. Rétrocompat : si match est absent, le backend
+    // construit le prompt comme avant.
+    const cur = await getState()
+    const match = cur.result?.match ?? undefined
     const res = await fetch(`${BACKEND_URL}/tailor-cv`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ offer }),
+      body: JSON.stringify(match ? { offer, match } : { offer }),
     })
     if (!res.ok) {
       const txt = await res.text()
@@ -167,6 +265,24 @@ async function runFillForm(
       applyError: '',
       inflight: null,
     })
+
+    // Auto-PATCH status='applied' sur l'application liée — quand on a un
+    // application_id sous la main (parce que l'utilisateur a scrapé l'offre
+    // avant de remplir). Si fill-form a été appelé sans scraping préalable,
+    // il n'y a pas encore d'application en DB ; l'utilisateur pourra
+    // ajouter le statut manuellement depuis le tracker.
+    const cur = await getState()
+    const appId = cur.result?.application_id
+    if (typeof appId === 'number') {
+      try {
+        const row = await patchApplication(appId, { status: 'applied' })
+        await reflectStatusInStorage(appId, row.status)
+      } catch (err) {
+        // Pas bloquant — le formulaire est bien rempli, seul le tracking
+        // a raté. On log mais on ne marque pas l'état comme erreur.
+        console.warn('Auto-PATCH applied a échoué :', err)
+      }
+    }
   } catch (err) {
     await setState({
       status: 'apply-error',
@@ -178,6 +294,10 @@ async function runFillForm(
 
 async function resetState(): Promise<void> {
   await chrome.storage.local.remove(STORAGE_KEY)
+}
+
+async function openTracker(): Promise<void> {
+  await chrome.tabs.create({ url: chrome.runtime.getURL(TRACKER_URL) })
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -199,6 +319,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       runFillForm(message.tabId, message.context).catch(() => {})
       sendResponse({ ok: true })
       return false
+    case 'PATCH_APPLICATION':
+      patchApplication(message.applicationId, message.patch)
+        .then(async (row) => {
+          await reflectStatusInStorage(message.applicationId, row.status)
+          sendResponse({ ok: true, row })
+        })
+        .catch((err) => sendResponse({ ok: false, error: friendlyFetchError(err) }))
+      return true // async response (sendResponse appelé après await)
+    case 'OPEN_TRACKER':
+      openTracker().then(() => sendResponse({ ok: true }))
+      return true
     case 'RESET_STATE':
       resetState().then(() => sendResponse({ ok: true }))
       return true

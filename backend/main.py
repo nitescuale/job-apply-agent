@@ -18,6 +18,7 @@ from backend.agents.job_scraper import scrape_job  # noqa: E402
 from backend.agents import llm_extractor  # noqa: E402
 from backend.agents import form_filler  # noqa: E402
 from backend.agents import cv_tailor  # noqa: E402
+from backend.agents import match_scorer  # noqa: E402
 from backend import store  # noqa: E402
 
 LOG_DIR = Path(__file__).parent / "logs"
@@ -62,6 +63,11 @@ class FillFormRequest(BaseModel):
 
 class TailorCvRequest(BaseModel):
     offer: dict
+    match: dict | None = None  # optionnel : {matched_skills, missing_skills}
+
+
+class MatchScoreRequest(BaseModel):
+    offer: dict
 
 
 class OpenFileRequest(BaseModel):
@@ -81,6 +87,7 @@ async def health():
         "llm_available": llm_extractor.is_available(),
         "form_filler_available": form_filler.is_available(),
         "cv_tailor_available": cv_tailor.is_available(),
+        "match_scorer_available": match_scorer.is_available(),
     }
 
 
@@ -137,7 +144,9 @@ async def tailor_cv_endpoint(request: TailorCvRequest):
     loop = asyncio.get_running_loop()
     try:
         result = await asyncio.wait_for(
-            loop.run_in_executor(None, cv_tailor.tailor_cv, request.offer),
+            loop.run_in_executor(
+                None, cv_tailor.tailor_cv, request.offer, request.match
+            ),
             timeout=60.0,
         )
         # Écrit cv_path dans l'application correspondante (créée par
@@ -168,6 +177,56 @@ async def tailor_cv_endpoint(request: TailorCvRequest):
     except Exception as exc:  # noqa: BLE001
         logger.exception("tailor-cv: erreur inattendue")
         raise HTTPException(status_code=500, detail=f"Tailor error: {exc}")
+
+
+@app.post("/match-score")
+async def match_score_endpoint(request: MatchScoreRequest):
+    """Score 0-100 de pertinence offre / profil utilisateur.
+
+    Cascade : Gemini (si clé dispo) → fallback overlap déterministe.
+    Toujours renvoie `{score, matched_skills, missing_skills, rationale,
+    llm_used}` — l'agent ne lève jamais d'exception côté logique métier.
+
+    Persiste `match_score` dans `applications` si une ligne existe pour ce
+    job_hash (l'offre a été scrappée au moins une fois).
+    """
+    offer = request.offer or {}
+    title = offer.get("title")
+    company = offer.get("company")
+    location = offer.get("location")
+    logger.info("POST /match-score — title=%r company=%r", title, company)
+
+    try:
+        profile = form_filler.load_profile()
+    except FileNotFoundError as exc:
+        logger.error("match-score: profil absent — %s", exc)
+        raise HTTPException(status_code=412, detail=str(exc))
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, match_scorer.score_match, offer, profile),
+            timeout=30.0,
+        )
+    except asyncio.TimeoutError:
+        logger.error("match-score: timeout")
+        raise HTTPException(status_code=504, detail="Match score timeout")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("match-score: erreur inattendue")
+        raise HTTPException(status_code=500, detail=f"Match score error: {exc}")
+
+    # Persistance opportuniste : seulement si l'offre est déjà trackée.
+    # On ne crée PAS d'application ici — c'est le rôle de /scrape-job.
+    job_hash = store.compute_job_hash(title, company, location)
+    row = store.get_application_by_hash(job_hash)
+    if row:
+        try:
+            store.set_match_score(row["id"], result["score"])
+            result["application_id"] = row["id"]
+        except Exception:  # noqa: BLE001
+            logger.exception("match-score: persistance échouée (non bloquant)")
+
+    return result
 
 
 @app.post("/open-file")

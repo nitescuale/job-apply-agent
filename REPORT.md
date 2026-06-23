@@ -1,5 +1,142 @@
 # REPORT.md — Job Apply Agent MVP
 
+## 2026-06-23 — Score de pertinence offre/profil (match_scorer)
+
+### Implémenté
+
+- **`backend/agents/match_scorer.py`** — nouvel agent. Cascade :
+  - **LLM path** (`is_available()` → clé Gemini présente) : prompt strict
+    qui exige un JSON `{score 0-100, matched_skills, missing_skills,
+    rationale ≤ 280 chars}`, response_mime_type `application/json`,
+    temperature 0. Parsing tolérant aux fences ```` ```json ... ``` ````.
+    Clamp du score dans `[0, 100]`. Garde-fou no-invention dans le prompt
+    (matched_skills ne contient que ce qui est explicitement dans le
+    profil).
+  - **Fallback déterministe** : overlap normalisé sur les skills (NFKD +
+    ASCII + lowercase + collapse). Choix overlap vs Jaccard parce qu'un
+    candidat avec PLUS de skills que ce que l'offre demande ne doit pas
+    être pénalisé (Jaccard ferait baisser le score). Score = matched /
+    total_offer * 100. Dédup au passage. Rationale auto-générée.
+  - **Jamais d'exception côté appelant** : LLM en erreur (JSON KO,
+    réseau, rate limit, structure inattendue) → log puis fallback. Garantit
+    une jauge toujours rendue côté extension.
+- **`POST /match-score`** — timeout 30 s, persistance opportuniste :
+  si `compute_job_hash(title, company, location)` matche une ligne
+  `applications` existante, on écrit `match_score` via le nouveau helper
+  **`store.set_match_score(application_id, score)`** (UPDATE direct, ne
+  crée pas la ligne — c'est le rôle exclusif de `/scrape-job`).
+- **`/tailor-cv` extension** : body accepte un champ optionnel `match:
+  {matched_skills, missing_skills}`. `cv_tailor.tailor_cv(offer,
+  match=None)` injecte un bloc `--- MATCH ---` dans le prompt Gemini avec
+  `matched_skills_emphasize_truthfully` (à valoriser quand le profil les
+  supporte déjà) et `missing_skills_do_not_claim_present` (à ne PAS
+  inventer dans les bullets). Rétrocompat strict si `match` est absent.
+- **Extension** : 
+  - Le service worker fetch `/match-score` **automatiquement** dès qu'un
+    `/scrape-job` termine en succès. Le résultat est attaché à
+    `result.match` dans `chrome.storage.local` → la popup le rend dès
+    l'arrivée via le subscriber `onChanged`.
+  - **`MatchCard`** dans Popup.tsx (état `ready`) : carte sobre Atelier
+    avec score grand (vert ≥70, ambre 45-69, rouge <45), barre de
+    progression, rationale, chips des missing_skills (12 max + "+N"
+    overflow). Mode "gemini" / "hors-ligne" affiché en petit pour
+    transparence. Placeholder "Calcul du score…" tant que `result.match`
+    est undefined (entre la fin de scrape et le retour match-score).
+  - `runTailorCv` forward `result.match` vers `/tailor-cv` si présent.
+- **Tests** : `tests/test_match_scorer.py` — 33 tests, suite totale
+  **129 verts**. Couvre :
+  - `is_available` (clé set/unset)
+  - `_clamp_score` (clamp haut/bas, cast string/float/None/abc)
+  - `_normalize` (NFKD + case + whitespace)
+  - `_extract_profile_skills` (list, dict par catégorie, manquant, None)
+  - Fallback : partial / full / zero overlap, no offer skills, normalisation,
+    dédup, output shape
+  - LLM path mocké : JSON propre, fences markdown, clamp >100 / <0 / non-numérique,
+    rationale tronquée, keys manquantes par défaut []
+  - Cascade : JSON invalide → fallback, RuntimeError → fallback, JSON
+    array (non-dict) → fallback. Output shape garantie sur les deux chemins.
+
+### Décisions
+
+- **Le score ne fail jamais l'analyse principale** : auto-trigger derrière
+  un try/catch silencieux (warn console). La popup montre l'offre même si
+  match-score plante. Cohérent avec la philosophie "dégradation propre"
+  utilisée partout ailleurs.
+- **Overlap > Jaccard** : un candidat avec des skills extras n'est pas
+  pénalisé. Pour un score "% des compétences requises que je possède", ça
+  parle plus que Jaccard qui descend mécaniquement avec les extras.
+- **Pas de création d'application dans `/match-score`** : on écrit
+  `match_score` seulement si une application existe déjà (créée par
+  `/scrape-job`). Évite les fantômes en DB quand on requête sans avoir
+  scrapé.
+- **Forward du match dans `/tailor-cv` côté service worker, pas côté
+  popup** : la popup ne sait pas que le tailor-cv profite du match, et
+  c'est très bien — le service worker est l'orchestrateur, il a déjà tout
+  l'état en `chrome.storage.local`.
+- **Placeholder pendant calcul** : `match === undefined` ≠ `match === null`.
+  Undefined = pas encore arrivé (cas normal). Pas de différentiation
+  null/undefined dans le rendu (le warn console suffit en cas d'échec).
+
+### Reste à faire / open
+
+- **Re-trigger manuel** : si l'utilisateur veut recalculer un score
+  (changement de profil entre deux essais), il faut reset l'extension et
+  refaire un Analyser. Pas de bouton "Recalculer le score" pour l'instant.
+- **Tracker** : pas encore de colonne `match_score` affichée dans la
+  page tracker. La donnée est persistée en DB mais le rendu ne l'utilise
+  pas encore. À faire si on veut trier par score dans le tracker.
+- **Threshold "skip cette offre"** : pas de notif/raccourci visuel
+  spécial pour les scores très bas (<30). Le score parle déjà de
+  lui-même côté UX ; à voir si on ajoute un bandeau "match faible".
+
+## 2026-06-23 — Suivi des candidatures + transitions de statut
+
+### Implémenté
+
+- **Auto-PATCH après fill-form succès** : le service worker appelle
+  `PATCH /applications/{application_id}` avec `status='applied'` si
+  `application_id` est présent dans `result` (donc si l'utilisateur a
+  scrapé l'offre avant de remplir). Sans application_id (cas "remplir
+  sans analyse"), skip silencieux — l'utilisateur marquera manuellement.
+- **Dropdown statut dans le popup** : remplace l'ancien badge "Déjà vu"
+  qui n'était que lecture. Le select est rendu dès que
+  `application_id` existe, avec optimistic update + PATCH via le service
+  worker. Le badge se met à jour live (onChanged → reflectStatusInStorage).
+- **Tracker — page plein écran** (`src/tracker/index.html`) ouverte via
+  bouton ▤ Suivi dans la TopBar du popup (`chrome.runtime.getURL` +
+  `chrome.tabs.create`). UX :
+  - Header + bouton ↻ Recharger
+  - 6 stat cards : total, déjà postulé, relancées, entretiens, réponses +/-
+  - Filtre : chips de statuts (Tous + un par status) + recherche texte
+    (matche company/title/location en sous-chaîne)
+  - Liste groupée par société (collapsibles via header)
+  - Chaque ligne : titre, location, contrat, "vue il y a Xj", dropdown
+    statut éditable (avec teinte selon statut), textarea notes (debounce
+    700 ms avant PATCH), liens ↗ offre + 📄 CV (passe par `/open-file`)
+- **Module partagé `extension/src/shared/status.ts`** : APPLICATION_STATUSES
+  + STATUS_LABELS + isProgressedStatus, importés par popup et tracker
+  (source of truth synchronisée avec `backend/store.VALID_STATUSES`).
+- **Build** : `tracker/index.html` ajouté à `rollupOptions.input` dans
+  `vite.config.ts` (CRXJS ne traite pas les HTML dans
+  `web_accessible_resources` — sans cette ligne, le `<script
+  src="./index.tsx">` était copié brut et le navigateur tentait de
+  charger du TSX). Listé dans `manifest.web_accessible_resources` pour
+  que `chrome.runtime.getURL(...)` résolve. Firefox build OK.
+- **`@types/node`** ajouté en devDep pour que `tsc --noEmit` accepte les
+  imports `node:path`/`node:url` du vite.config.ts.
+
+### Décisions
+
+- **`store.set_match_score` vs `update_application`** : helper dédié pour
+  éviter qu'un PATCH manuel mal formé n'écrase un score calculé. Plus
+  défensif que d'ajouter `match_score` à `update_application`.
+- **Tracker autonome côté frontend** : pas de couche
+  `chrome.storage.local`, pas d'auto-refresh WebSocket. Le bouton ↻ suffit.
+  Le tracker est conçu pour être ouvert ponctuellement, pas en permanence.
+- **Auto-PATCH skippé si pas d'application_id** : préserve la propreté
+  de la DB. Mieux que créer une ligne avec des données partielles
+  inférées du formulaire.
+
 ## 2026-06-23 — Tailoring strictly scoped + filename convention propre
 
 ### Implémenté

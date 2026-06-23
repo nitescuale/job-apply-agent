@@ -1,4 +1,10 @@
 import React, { useEffect, useState } from 'react'
+import {
+  APPLICATION_STATUSES,
+  STATUS_LABELS,
+  isProgressedStatus,
+  type ApplicationStatus,
+} from '../shared/status'
 
 const BACKEND_URL = 'http://localhost:8000'
 const STORAGE_KEY = 'job-apply-popup-state'
@@ -17,6 +23,14 @@ type Status =
   | 'applied'     // form filled successfully
   | 'error'       // analysis error
   | 'apply-error' // apply error (keep showing whatever was shown before)
+
+interface MatchResult {
+  score: number
+  matched_skills: string[]
+  missing_skills: string[]
+  rationale: string
+  llm_used: boolean
+}
 
 interface OfferResult {
   url?: string
@@ -43,16 +57,9 @@ interface OfferResult {
   seen_before?: boolean
   application_status?: string
   from_cache?: boolean
+  // score de pertinence (alimenté par /match-score automatiquement après scrape)
+  match?: MatchResult | null
   [key: string]: unknown
-}
-
-const STATUS_LABELS: Record<string, string> = {
-  seen: 'Déjà vu',
-  applied: 'Déjà postulé',
-  followed_up: 'Relancée',
-  interview: 'Entretien',
-  response_pos: 'Réponse positive',
-  response_neg: 'Réponse négative',
 }
 
 interface FillReport {
@@ -188,6 +195,27 @@ const STYLES = `
     border-color: var(--ac);
     color: var(--ac);
   }
+  .ja-bar-tracker {
+    height: 26px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: var(--bg);
+    color: var(--mut);
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.02em;
+    padding: 0 9px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .ja-bar-tracker:hover {
+    background: var(--ac-soft);
+    border-color: var(--ac);
+    color: var(--ac);
+  }
 
   /* body */
   .ja-body {
@@ -238,6 +266,146 @@ const STYLES = `
     color: var(--ac);
     background: var(--ac-soft);
     border-color: transparent;
+  }
+  .ja-status-pick {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 16px;
+    margin-left: 8px;
+  }
+  .ja-status-pick label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    color: var(--mut);
+    text-transform: lowercase;
+  }
+  .ja-status-pick select {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.02em;
+    padding: 4px 22px 4px 8px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: var(--pan);
+    color: var(--ink);
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image:
+      linear-gradient(45deg, transparent 50%, var(--mut) 50%),
+      linear-gradient(135deg, var(--mut) 50%, transparent 50%);
+    background-position: calc(100% - 11px) 50%, calc(100% - 7px) 50%;
+    background-size: 4px 4px;
+    background-repeat: no-repeat;
+    transition: border-color 0.15s, background-color 0.15s;
+  }
+  .ja-status-pick select:hover { border-color: var(--ac); }
+  .ja-status-pick select.progressed {
+    background-color: var(--ac-soft);
+    color: var(--ac);
+    border-color: transparent;
+  }
+  .ja-status-pick select:disabled { opacity: 0.6; cursor: default; }
+
+  /* match score card */
+  .ja-match {
+    border: 1px solid var(--line);
+    border-radius: 13px;
+    background: var(--pan);
+    padding: 14px 15px;
+    margin: 0 0 18px;
+  }
+  .ja-match-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .ja-match-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    color: var(--mut);
+    text-transform: lowercase;
+  }
+  .ja-match-mode {
+    font-family: var(--mono);
+    font-size: 9.5px;
+    color: var(--faint);
+    letter-spacing: 0.04em;
+  }
+  .ja-match-row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .ja-match-num {
+    font-size: 30px;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1;
+    color: var(--ac);
+    font-variant-numeric: tabular-nums;
+  }
+  .ja-match-num.weak { color: var(--bad); }
+  .ja-match-num.mid { color: var(--warn, #b88a3f); }
+  .ja-match-bar {
+    flex: 1;
+    height: 4px;
+    background: var(--line);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .ja-match-bar-fill {
+    height: 100%;
+    background: var(--ac);
+    transition: width 0.3s ease;
+  }
+  .ja-match-bar-fill.weak { background: var(--bad); }
+  .ja-match-bar-fill.mid { background: var(--warn, #b88a3f); }
+  .ja-match-rationale {
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: #54564d;
+    margin: 0 0 10px;
+  }
+  .ja-match-missing-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    color: var(--mut);
+    text-transform: lowercase;
+    margin-bottom: 6px;
+  }
+  .ja-match-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+  .ja-match-chip {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.02em;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: var(--bad-soft);
+    color: var(--bad);
+    border: 1px solid transparent;
+  }
+  .ja-match-chip.matched {
+    background: var(--ac-soft);
+    color: var(--ac);
+  }
+  .ja-match-pending {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--mut);
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
   .ja-company {
     display: flex;
@@ -643,9 +811,11 @@ const STYLES = `
 function TopBar({
   showShortcut,
   onReset,
+  onOpenTracker,
 }: {
   showShortcut: boolean
   onReset?: () => void
+  onOpenTracker?: () => void
 }) {
   return (
     <div className="ja-bar">
@@ -655,6 +825,17 @@ function TopBar({
       </div>
       <div className="ja-bar-right">
         {showShortcut && <span className="ja-kbd">{SHORTCUT_HINT}</span>}
+        {onOpenTracker && (
+          <button
+            type="button"
+            className="ja-bar-tracker"
+            onClick={onOpenTracker}
+            aria-label="Suivi des candidatures"
+            title="Suivi des candidatures"
+          >
+            ▤ Suivi
+          </button>
+        )}
         {onReset && (
           <button
             type="button"
@@ -678,6 +859,70 @@ function Row({ label, value }: { label: string; value: string | null }) {
     <div className="ja-row">
       <dt className="ja-dt">{label}</dt>
       <dd className={`ja-dd${empty ? ' empty' : ''}`}>{empty ? 'non précisé' : value}</dd>
+    </div>
+  )
+}
+
+function scoreVariant(score: number): '' | 'mid' | 'weak' {
+  if (score >= 70) return ''
+  if (score >= 45) return 'mid'
+  return 'weak'
+}
+
+function MatchCard({ match }: { match: MatchResult | null | undefined }) {
+  // match=undefined → en cours de calcul (background a fini scrape, fetch
+  // match-score en vol). match=null ou objet → on rend la carte. Pas de
+  // carte si l'utilisateur n'est pas sur "ready" avec un scrape complet.
+  if (match === undefined) {
+    return (
+      <div className="ja-match">
+        <div className="ja-match-head">
+          <span className="ja-match-label">score de pertinence</span>
+        </div>
+        <div className="ja-match-pending">
+          <span className="ja-spin-dark" /> Calcul du score…
+        </div>
+      </div>
+    )
+  }
+  if (!match) return null
+  const variant = scoreVariant(match.score)
+  const missing = match.missing_skills ?? []
+  return (
+    <div className="ja-match">
+      <div className="ja-match-head">
+        <span className="ja-match-label">score de pertinence</span>
+        <span className="ja-match-mode">
+          {match.llm_used ? 'gemini' : 'hors-ligne'}
+        </span>
+      </div>
+      <div className="ja-match-row">
+        <span className={`ja-match-num ${variant}`}>{match.score}</span>
+        <div className="ja-match-bar">
+          <div
+            className={`ja-match-bar-fill ${variant}`}
+            style={{ width: `${Math.max(0, Math.min(100, match.score))}%` }}
+          />
+        </div>
+      </div>
+      {match.rationale && <p className="ja-match-rationale">{match.rationale}</p>}
+      {missing.length > 0 && (
+        <>
+          <div className="ja-match-missing-label">
+            compétences manquantes ({missing.length})
+          </div>
+          <div className="ja-match-chips">
+            {missing.slice(0, 12).map((s) => (
+              <span key={s} className="ja-match-chip">
+                {s}
+              </span>
+            ))}
+            {missing.length > 12 && (
+              <span className="ja-match-chip">+{missing.length - 12}</span>
+            )}
+          </div>
+        </>
+      )}
     </div>
   )
 }
@@ -855,6 +1100,23 @@ export default function Popup() {
     }
   }
 
+  function handleOpenTracker() {
+    chrome.runtime.sendMessage({ type: 'OPEN_TRACKER' })
+  }
+
+  function handleStatusChange(newStatus: ApplicationStatus) {
+    const appId = result?.application_id
+    if (typeof appId !== 'number') return
+    // Optimistic update — le background va PATCH puis confirmer via storage,
+    // mais on flippe l'UI immédiatement pour la responsivité.
+    setResult({ ...(result as OfferResult), application_status: newStatus, seen_before: true })
+    chrome.runtime.sendMessage({
+      type: 'PATCH_APPLICATION',
+      applicationId: appId,
+      patch: { status: newStatus },
+    })
+  }
+
   function handleReset() {
     // Local immédiat + signal au background qui wipe storage. onChanged
     // ré-appliquera l'état vide, ce qui est idempotent côté React.
@@ -893,7 +1155,7 @@ export default function Popup() {
       <>
         <style>{STYLES}</style>
         <div className="ja-panel">
-          <TopBar showShortcut={false} />
+          <TopBar showShortcut={false} onOpenTracker={handleOpenTracker} />
           <div className="ja-idle">
             <h1>Page d'offre ou de candidature ?</h1>
             <p>
@@ -918,7 +1180,7 @@ export default function Popup() {
       <>
         <style>{STYLES}</style>
         <div className="ja-panel">
-          <TopBar showShortcut={false} onReset={handleReset} />
+          <TopBar showShortcut={false} onReset={handleReset} onOpenTracker={handleOpenTracker} />
           <div className="ja-idle">
             <h1>Remplissage du formulaire.</h1>
             {status === 'applying' && (
@@ -970,7 +1232,7 @@ export default function Popup() {
       <>
         <style>{STYLES}</style>
         <div className="ja-panel">
-          <TopBar showShortcut={false} onReset={handleReset} />
+          <TopBar showShortcut={false} onReset={handleReset} onOpenTracker={handleOpenTracker} />
           <div className="ja-loading">
             <div className="ja-loading-msg">Extraction + filtrage LLM…</div>
             <div className="ja-bar-scan" />
@@ -985,7 +1247,7 @@ export default function Popup() {
       <>
         <style>{STYLES}</style>
         <div className="ja-panel">
-          <TopBar showShortcut={false} onReset={handleReset} />
+          <TopBar showShortcut={false} onReset={handleReset} onOpenTracker={handleOpenTracker} />
           <div className="ja-error">
             <div className="ja-err-label">erreur · analyse</div>
             <div className="ja-err-msg">Échec de l'analyse.</div>
@@ -1021,7 +1283,11 @@ export default function Popup() {
     <>
       <style>{STYLES}</style>
       <div className="ja-panel">
-        <TopBar showShortcut={status === 'ready'} onReset={handleReset} />
+        <TopBar
+          showShortcut={status === 'ready'}
+          onReset={handleReset}
+          onOpenTracker={handleOpenTracker}
+        />
 
         <div className="ja-body">
           {r.llm_used ? (
@@ -1032,13 +1298,22 @@ export default function Popup() {
           ) : (
             <span className="ja-tag muted">scraping brut</span>
           )}
-          {r.seen_before && r.application_status && (
-            <span
-              className={`ja-badge-status ${
-                r.application_status === 'seen' ? 'seen' : 'progressed'
-              }`}
-            >
-              {STATUS_LABELS[r.application_status] || r.application_status}
+          {typeof r.application_id === 'number' && (
+            <span className="ja-status-pick">
+              <label htmlFor="ja-status-select">statut</label>
+              <select
+                id="ja-status-select"
+                value={r.application_status ?? 'seen'}
+                className={isProgressedStatus(r.application_status) ? 'progressed' : ''}
+                onChange={(e) => handleStatusChange(e.target.value as ApplicationStatus)}
+                title="Changer le statut de cette candidature"
+              >
+                {APPLICATION_STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {STATUS_LABELS[s]}
+                  </option>
+                ))}
+              </select>
             </span>
           )}
 
@@ -1059,6 +1334,8 @@ export default function Popup() {
             <Row label="publié" value={published} />
             {expires && <Row label="expire" value={expires} />}
           </dl>
+
+          <MatchCard match={r.match} />
 
           <div className="ja-cv">
             <div className="ja-cv-label">

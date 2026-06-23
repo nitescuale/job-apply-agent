@@ -289,6 +289,28 @@ def list_applications(
     return [dict(r) for r in rows]
 
 
+def set_match_score(application_id: int, score: float) -> ApplicationRow | None:
+    """Met à jour `match_score` sur une application. Retourne la ligne ou None.
+
+    Endpoint dédié (vs update_application générique) parce que le score est
+    écrit automatiquement par /match-score et qu'on veut éviter qu'un appel
+    PATCH manuel mal formé n'écrase un score précédemment calculé.
+    """
+    now = _utc_now()
+    with _conn() as c:
+        cur = c.execute(
+            "UPDATE applications SET match_score = ?, updated_at = ? WHERE id = ?",
+            (float(score), now, application_id),
+        )
+        c.commit()
+        if cur.rowcount == 0:
+            return None
+        row = c.execute(
+            "SELECT * FROM applications WHERE id = ?", (application_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def update_application(
     application_id: int,
     *,
