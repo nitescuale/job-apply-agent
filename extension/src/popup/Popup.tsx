@@ -75,7 +75,15 @@ interface CvResult {
   summary_used?: boolean
 }
 
+interface CoverLetterResult {
+  saved_path: string
+  filename: string
+  folder: string
+  text?: string
+}
+
 type CvState = 'idle' | 'generating' | 'done' | 'error'
+type ClState = 'idle' | 'generating' | 'done' | 'error'
 
 // ──────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -941,6 +949,9 @@ export default function Popup() {
   const [cvState, setCvState] = useState<CvState>('idle')
   const [cvResult, setCvResult] = useState<CvResult | null>(null)
   const [cvError, setCvError] = useState('')
+  const [clState, setClState] = useState<ClState>('idle')
+  const [clResult, setClResult] = useState<CoverLetterResult | null>(null)
+  const [clError, setClError] = useState('')
   // Le popup MV3 est détruit dès qu'on clique en dehors. Le boulot (fetch
   // backend, content-script round-trips) est délégué au service worker
   // (background.ts) qui survit aux fermetures, écrit son avancement dans
@@ -955,15 +966,20 @@ export default function Popup() {
     cvState: CvState
     cvResult: CvResult | null
     cvError: string
-    inflight: { kind: 'scrape' | 'apply' | 'tailor'; started_at: number } | null
+    clState: ClState
+    clResult: CoverLetterResult | null
+    clError: string
+    inflight: { kind: 'scrape' | 'apply' | 'tailor' | 'cover'; started_at: number } | null
   }>) {
     const inflight = saved.inflight
     const isStale = !!inflight && Date.now() - inflight.started_at > STALE_INFLIGHT_MS
     let s: Status = saved.status ?? 'idle'
     let cv: CvState = saved.cvState ?? 'idle'
+    let cl: ClState = saved.clState ?? 'idle'
     let err = saved.error ?? ''
     let applyErr = saved.applyError ?? ''
     let cvErr = saved.cvError ?? ''
+    let clErr = saved.clError ?? ''
     if (isStale) {
       // Le worker a probablement été tué (browser closed, very long idle)
       // sans terminer son fetch. On rabat sur un état d'erreur explicite.
@@ -979,6 +995,10 @@ export default function Popup() {
         cv = 'error'
         cvErr = cvErr || 'Génération interrompue. Réessaie.'
       }
+      if (cl === 'generating') {
+        cl = 'error'
+        clErr = clErr || 'Génération interrompue. Réessaie.'
+      }
     }
     setStatus(s)
     setResult(saved.result ?? null)
@@ -988,6 +1008,9 @@ export default function Popup() {
     setCvState(cv)
     setCvResult(saved.cvResult ?? null)
     setCvError(cvErr)
+    setClState(cl)
+    setClResult(saved.clResult ?? null)
+    setClError(clErr)
   }
 
   // Hydrate au mount + écoute live des écritures background
@@ -1015,6 +1038,9 @@ export default function Popup() {
         setCvState('idle')
         setCvResult(null)
         setCvError('')
+        setClState('idle')
+        setClResult(null)
+        setClError('')
       }
     }
     chrome.storage.onChanged.addListener(onChanged)
@@ -1129,7 +1155,47 @@ export default function Popup() {
     setCvState('idle')
     setCvResult(null)
     setCvError('')
+    setClState('idle')
+    setClResult(null)
+    setClError('')
     chrome.runtime.sendMessage({ type: 'RESET_STATE' })
+  }
+
+  async function handleCoverLetter() {
+    if (!result || clState === 'generating') return
+    const offer = {
+      title: result.title,
+      company: result.company,
+      location: result.location,
+      contract_type: result.contract_type ?? result.employment_type,
+      salary: result.salary,
+      remote: result.remote,
+      experience_level: result.experience_level,
+      skills: result.skills,
+      missions: result.missions,
+      summary: result.summary,
+      description: result.description,
+      url: result.url,
+    }
+    chrome.runtime.sendMessage({ type: 'START_COVER_LETTER', offer })
+  }
+
+  async function handleOpenCoverLetter() {
+    if (!clResult?.saved_path) return
+    try {
+      const res = await fetch(`${BACKEND_URL}/open-file`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: clResult.saved_path }),
+      })
+      if (!res.ok) {
+        const txt = await res.text()
+        throw new Error(`Backend ${res.status} — ${txt.slice(0, 140)}`)
+      }
+    } catch (err) {
+      setClError(err instanceof Error ? err.message : 'Erreur inconnue')
+      setClState('error')
+    }
   }
 
   // Cmd+Enter / Ctrl+Enter triggers Postuler dès qu'on peut remplir un form
@@ -1370,6 +1436,43 @@ export default function Popup() {
             {cvState === 'error' && (
               <div className="ja-cv-error" style={{ marginTop: 8 }}>
                 {cvError}
+              </div>
+            )}
+          </div>
+
+          <div className="ja-cv">
+            <div className="ja-cv-label">
+              <span>lettre · long-form personnalisée</span>
+              {clState === 'done' && <span style={{ color: 'var(--ac)' }}>générée</span>}
+            </div>
+
+            {(clState === 'idle' || clState === 'error') && (
+              <button className="ja-cv-btn" onClick={handleCoverLetter}>
+                Lettre de motivation
+              </button>
+            )}
+
+            {clState === 'generating' && (
+              <button className="ja-cv-btn" disabled>
+                <span className="ja-spin-dark" /> Génération…
+              </button>
+            )}
+
+            {clState === 'done' && clResult && (
+              <>
+                <button className="ja-cv-btn success" onClick={handleOpenCoverLetter}>
+                  ✓ Ouvrir le PDF
+                </button>
+                <div className="ja-cv-file">{clResult.filename}</div>
+                <button className="ja-cv-regen" onClick={handleCoverLetter}>
+                  ↻ régénérer
+                </button>
+              </>
+            )}
+
+            {clState === 'error' && (
+              <div className="ja-cv-error" style={{ marginTop: 8 }}>
+                {clError}
               </div>
             )}
           </div>

@@ -18,6 +18,7 @@ from backend.agents.job_scraper import scrape_job  # noqa: E402
 from backend.agents import llm_extractor  # noqa: E402
 from backend.agents import form_filler  # noqa: E402
 from backend.agents import cv_tailor  # noqa: E402
+from backend.agents import cover_letter  # noqa: E402
 from backend.agents import match_scorer  # noqa: E402
 from backend import store  # noqa: E402
 
@@ -70,6 +71,11 @@ class MatchScoreRequest(BaseModel):
     offer: dict
 
 
+class CoverLetterRequest(BaseModel):
+    offer: dict
+    match: dict | None = None
+
+
 class OpenFileRequest(BaseModel):
     path: str
 
@@ -87,6 +93,7 @@ async def health():
         "llm_available": llm_extractor.is_available(),
         "form_filler_available": form_filler.is_available(),
         "cv_tailor_available": cv_tailor.is_available(),
+        "cover_letter_available": cover_letter.is_available(),
         "match_scorer_available": match_scorer.is_available(),
     }
 
@@ -177,6 +184,59 @@ async def tailor_cv_endpoint(request: TailorCvRequest):
     except Exception as exc:  # noqa: BLE001
         logger.exception("tailor-cv: erreur inattendue")
         raise HTTPException(status_code=500, detail=f"Tailor error: {exc}")
+
+
+@app.post("/cover-letter")
+async def cover_letter_endpoint(request: CoverLetterRequest):
+    """Génère une lettre de motivation long-form via Gemini, en sauve le
+    DOCX et le PDF côte à côte avec le CV, et persiste `cover_letter_path`
+    sur l'application correspondante.
+
+    Mirror du pipeline /tailor-cv : même dossier entreprise, conversion
+    PDF via `pdf_convert.convert_docx_to_pdf` (docx2pdf -> LibreOffice).
+    """
+    offer = request.offer or {}
+    title = offer.get("title")
+    company = offer.get("company")
+    location = offer.get("location")
+    logger.info("POST /cover-letter — title=%r company=%r", title, company)
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(
+                None, cover_letter.tailor_cover_letter, request.offer, request.match
+            ),
+            timeout=60.0,
+        )
+        # Persistance — comme pour le CV, on rattache à l'application liée
+        # par job_hash. Si pas d'application existante (l'user a généré une
+        # lettre sans scraper avant), on en crée une avec status='seen'.
+        job_hash = store.compute_job_hash(title, company, location)
+        row = store.get_application_by_hash(job_hash)
+        if row is None:
+            app_id, _ = store.upsert_application(
+                job_hash, company=company, title=title, location=location,
+            )
+        else:
+            app_id = row["id"]
+        store.update_application(app_id, cover_letter_path=result.get("saved_path"))
+        return result
+    except FileNotFoundError as exc:
+        logger.error("cover-letter: ressource absente — %s", exc)
+        raise HTTPException(status_code=412, detail=str(exc))
+    except ValueError as exc:
+        logger.error("cover-letter: validation — %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc))
+    except RuntimeError as exc:
+        logger.error("cover-letter: erreur — %s", exc)
+        raise HTTPException(status_code=502, detail=str(exc))
+    except asyncio.TimeoutError:
+        logger.error("cover-letter: timeout")
+        raise HTTPException(status_code=504, detail="Cover letter timeout")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("cover-letter: erreur inattendue")
+        raise HTTPException(status_code=500, detail=f"Cover letter error: {exc}")
 
 
 @app.post("/match-score")

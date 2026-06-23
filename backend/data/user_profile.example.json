@@ -22,8 +22,17 @@
   "salary_expectation": "45-55k EUR/an",
   "summary": "Data scientist orienté produit, 3 ans d'expérience sur des pipelines ML en production. Passionné par les systèmes distribués et l'observabilité.",
   "cover_letter_template": "Bonjour,\n\nJe candidate avec enthousiasme au poste de {title} chez {company}. Mon parcours en {field} et mes 3 années d'expérience me semblent en parfaite adéquation avec vos besoins.\n\nCordialement,\nAlex Nitescu",
+  "qa_bank": {
+    "availability": "Disponible à partir de juin 2026, dès la fin de mes études.",
+    "salary_expectations": "45-55k EUR brut/an, négociable selon le périmètre et les avantages.",
+    "notice_period": "Pas de préavis — je termine mes études en juin 2026.",
+    "visa_sponsorship": "Citoyen UE, pas besoin de sponsorship visa pour travailler en France ou dans l'Union européenne.",
+    "relocation": "Ouvert à un déménagement pour Paris, Londres ou tout autre hub européen.",
+    "motivation_template": "Je souhaite rejoindre {company} pour le poste de {title} parce que mon parcours en data science et mes projets ML s'alignent avec votre mission. À adapter en 4-6 lignes selon le contexte (mission, stack, produit).",
+    "why_us_template": "L'approche de {company} sur {domain} me parle directement — j'ai construit des projets similaires (voir GitHub) et je serais ravi de contribuer à ce qui se passe chez vous."
+  },
   "cv_path": "",
   "base_cv_path": "",
   "cv_output_dir": "",
-  "_comment": "Copier ce fichier en user_profile.json (gitignoré). cv_path = PDF prêt-à-upload (peut rester vide, on génère). base_cv_path = chemin absolu vers ton DOCX source (.docx requis, .doc legacy non supporté). cv_output_dir = dossier racine où les CV adaptés seront générés (ex: C:/Users/Alex/Documents/CVs). Le pipeline /tailor-cv édite ce DOCX en place (texte des paragraphes éditables réécrit par Gemini, formatting conservé) puis convertit en PDF via docx2pdf (Word COM, qualité maximale) ou LibreOffice headless en fallback."
+  "_comment": "Copier ce fichier en user_profile.json (gitignoré). cv_path = PDF prêt-à-upload (peut rester vide, on génère). base_cv_path = chemin absolu vers ton DOCX source (.docx requis, .doc legacy non supporté). cv_output_dir = dossier racine où les CV et lettres adaptés seront générés (ex: C:/Users/Alex/Documents/CVs). Le pipeline /tailor-cv édite ce DOCX en place puis convertit en PDF, /cover-letter génère une lettre long-form et la sauve en 1_Cover_Letter_*. qa_bank est une banque de réponses canoniques aux questions récurrentes des formulaires (disponibilité, salaire, visa...). form_filler adapte ces réponses au contexte plutôt que de les régénérer à froid."
 }

@@ -24,7 +24,7 @@ MAX_PAYLOAD_CHARS = 16000
 _SYSTEM = """Tu remplis un formulaire de candidature d'emploi à partir d'un profil utilisateur.
 On te fournit deux objets JSON :
 - form_schema : la liste des champs du formulaire (id, label, type, required, options, placeholder)
-- profile : les infos de l'utilisateur (nom, email, expérience, lettre type, etc.)
+- profile : les infos de l'utilisateur (nom, email, expérience, lettre type, qa_bank, etc.)
 - context (optionnel) : infos sur l'offre courante (title, company) pour personnaliser la lettre
 
 Pour chaque champ, décide la valeur la plus adaptée en croisant le label et le profil.
@@ -37,6 +37,23 @@ Règles strictes :
   en injectant `{title}` et `{company}` depuis context si présent. Reste sobre, 4-6 lignes max.
 - Pour les fichiers (type=file), renvoie "__CV__" si le profil a cv_path, sinon omets.
 - Ignore les champs purement décoratifs (h1, hidden, captcha).
+
+Banque de réponses (qa_bank, optionnelle) :
+Si `profile.qa_bank` est présent, c'est un mapping {clé canonique: réponse de
+référence} pour les questions récurrentes des formulaires (availability,
+salary_expectations, notice_period, visa_sponsorship, relocation,
+motivation_template, why_us_template, ...). Quand le label d'un champ
+correspond à une de ces clés (apparariement flou autorisé — "Quand
+seriez-vous disponible ?" matche `availability`, "Prétentions salariales"
+matche `salary_expectations`, etc.) :
+- ADAPTE la réponse de référence au champ (interpole `{company}` /
+  `{title}` / `{domain}` depuis context si présents, ajuste la phrasing
+  au type de champ — texte court vs textarea long vs select).
+- N'utilise PAS la réponse mot pour mot si le label demande une
+  formulation différente.
+- N'utilise PAS la qa_bank pour des questions qui n'y figurent pas — dans
+  ce cas, garde la logique normale (déduction depuis les autres champs du
+  profil).
 
 Réponds avec UNIQUEMENT un objet JSON plat de la forme {field_id: value}.
 Pas de texte autour, pas de fences markdown."""

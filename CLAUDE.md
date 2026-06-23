@@ -56,16 +56,26 @@ job-apply-agent/
 │   ├── agents/
 │   │   ├── job_scraper.py          Scrapling : JSON-LD → meta → site → texte
 │   │   ├── llm_extractor.py        Gemini : filtre/structure l'offre
-│   │   ├── form_filler.py          Gemini : profil + form_schema → values
+│   │   ├── form_filler.py          Gemini : profil + form_schema → values.
+│   │   │                           Adapte qa_bank (banque de réponses
+│   │   │                           canoniques : disponibilité, salaire,
+│   │   │                           visa, ...) au lieu de régénérer à froid.
 │   │   ├── match_scorer.py         Gemini + fallback overlap déterministe
 │   │   │                           → {score 0-100, matched_skills,
 │   │   │                              missing_skills, rationale, llm_used}
+│   │   ├── pdf_convert.py          DOCX -> PDF (docx2pdf -> soffice).
+│   │   │                           Extrait pour réutilisation cv_tailor +
+│   │   │                           cover_letter sans cycle d'import.
+│   │   ├── cover_letter.py         Gemini : génère une lettre long-form
+│   │   │                           dans la langue de l'offre, builds DOCX
+│   │   │                           via python-docx, convertit via
+│   │   │                           pdf_convert. Accepte un `match` optionnel.
 │   │   └── cv_tailor.py            python-docx édite en place uniquement
 │   │                               SUMMARY + "Relevant coursework",
 │   │                               Gemini renvoie {idx: new_text},
-│   │                               docx2pdf (Word) → PDF. Accepte un
-│   │                               `match` optionnel pour orienter le
-│   │                               prompt (sans inventer les missing).
+│   │                               pdf_convert (Word/Office) → PDF.
+│   │                               Accepte un `match` optionnel pour orienter
+│   │                               le prompt (sans inventer les missing).
 │   └── data/
 │       ├── user_profile.example.json
 │       ├── user_profile.json       gitignoré (profil réel)
@@ -342,6 +352,59 @@ missing_skills).
    `missing_skills_do_not_claim_present`. Rétrocompat strict : sans
    match, le prompt est identique à avant.
 
+### 2.ter. `/cover-letter` — lettre de motivation long-form
+
+Endpoint dédié + bouton "Lettre de motivation" dans l'état `ready` du
+popup. Pipeline mirror du CV mais sans template d'origine — on génère
+intégralement le texte via Gemini.
+
+1. **`cover_letter.generate_cover_letter(offer, profile, match=None) → str`** :
+   - Prompt en anglais (Gemini suit mieux les contraintes structurelles
+     en anglais), mais consigne explicite "LANGUAGE RULE: write in the
+     SAME language as the OFFER" pour que la lettre sorte dans la langue
+     de l'offre (FR si l'offre est en FR, EN sinon).
+   - Structure imposée 3-4 paragraphes (~300-450 mots) : opening + why
+     this role + why this company + closing.
+   - Réutilise `BANNED_CLICHES` de cv_tailor (consigne dans le prompt +
+     audit log warn si Gemini glisse un cliché malgré la règle).
+   - Pas d'invention factuelle.
+   - Bloc `--- MATCH ---` optionnel pour orienter les
+     `matched_skills_emphasize_truthfully` /
+     `missing_skills_do_not_claim_present`.
+   - Raise sur clé absente ou réponse vide.
+2. **`cover_letter._build_docx(text, profile, offer, docx_path)`** :
+   python-docx assemble un DOCX minimaliste — header contact (nom bold +
+   email/phone/city), date + destinataire, corps (split sur double
+   newline), signature. Mise en page sobre, taille 10 sur le contact.
+3. **`cover_letter.tailor_cover_letter(offer, match=None)`** :
+   orchestrateur — résout le chemin de sortie, génère le texte, écrit le
+   DOCX, convertit via `pdf_convert.convert_docx_to_pdf`.
+4. **Filename** : `1_Cover_Letter_Firstname_Lastname_JobTitle.pdf`
+   (préfixe `1_` pour trier après le CV `0_CV_*`). Réutilise
+   `_canonical_job_title` + `_slug_title` de cv_tailor.
+5. **Persistance** : l'endpoint upserte l'application si elle n'existe
+   pas (cas "lettre générée sans scrape"), puis écrit
+   `cover_letter_path` via `store.update_application`.
+6. **`POST /cover-letter`** body `{offer, match?}` → `{text, saved_path,
+   saved_docx_path, filename, folder}`. Timeout 60s, codes standards.
+
+### 2.quater. `qa_bank` — banque de réponses canoniques
+
+Champ optionnel `qa_bank` dans `user_profile.json` : mapping
+`{clé canonique: réponse de référence}` pour les questions récurrentes
+des formulaires (availability, salary_expectations, notice_period,
+visa_sponsorship, relocation, motivation_template, why_us_template).
+
+Le prompt de `form_filler._SYSTEM` instruit Gemini à **adapter** la
+réponse de la banque au champ (interpole `{company}`/`{title}`, ajuste
+la phrasing au type du champ — texte court vs textarea long) au lieu
+de la régénérer à froid. Apparariement flou autorisé ("Quand seriez-vous
+disponible ?" → `availability`).
+
+Aucun changement de payload : la `qa_bank` est sérialisée comme le reste
+du profil. Rétrocompat : un profil sans `qa_bank` continue à marcher
+comme avant.
+
 ### 3. `/fill-form` — remplissage du formulaire
 
 1. Content script `DETECT_FORM` → schéma `{fields: [{id, label, type,
@@ -366,7 +429,8 @@ sans devoir scraper l'offre au préalable.
 
 ```
 GET  /health         → {status, llm_available, form_filler_available,
-                        cv_tailor_available, match_scorer_available}
+                        cv_tailor_available, cover_letter_available,
+                        match_scorer_available}
 
 POST /scrape-job     body: {job_url, job_html}
                      → champs offre + {llm_used, llm_error?, from_cache,
@@ -380,6 +444,9 @@ POST /match-score    body: {offer}
 POST /tailor-cv      body: {offer, match?: {matched_skills, missing_skills}}
                      → {saved_path, saved_docx_path, filename, folder,
                         edited_count, editable_count}
+
+POST /cover-letter   body: {offer, match?: {matched_skills, missing_skills}}
+                     → {text, saved_path, saved_docx_path, filename, folder}
 
 POST /fill-form      body: {form_schema, context?}
                      → {values: {field_id: value}, cv_base64?}

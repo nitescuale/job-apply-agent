@@ -122,6 +122,57 @@ def test_get_cv_base64_returns_none_when_no_path(profile_file):
     assert form_filler.get_cv_base64() is None
 
 
+def test_system_prompt_mentions_qa_bank():
+    """Le _SYSTEM doit instruire Gemini sur l'usage de la qa_bank — sans ça,
+    le LLM régénère tout à froid au lieu d'adapter les réponses canoniques."""
+    assert "qa_bank" in form_filler._SYSTEM.lower()
+    # Quelques clés canoniques mentionnées par exemple
+    assert "availability" in form_filler._SYSTEM
+    assert "salary_expectations" in form_filler._SYSTEM
+
+
+def test_fill_form_passes_qa_bank_into_prompt(profile_file, monkeypatch):
+    """Si la qa_bank est dans le profil, ses entrées atterrissent dans le prompt
+    Gemini (sérialisation JSON complète du profil)."""
+    qa_bank = {
+        "availability": "Disponible juin 2026.",
+        "salary_expectations": "45-55k EUR/an.",
+        "visa_sponsorship": "Citoyen UE.",
+    }
+    profile = {**SAMPLE_PROFILE, "qa_bank": qa_bank}
+    profile_file.write_text(json.dumps(profile), encoding="utf-8")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+
+    schema = {
+        "fields": [
+            {"id": "field_av", "label": "Quand êtes-vous disponible ?", "type": "text"},
+            {"id": "field_sal", "label": "Prétentions salariales", "type": "text"},
+        ]
+    }
+    fake = json.dumps({
+        "field_av": "Disponible juin 2026 (fin de mes études).",
+        "field_sal": "45-55k EUR brut annuel.",
+    })
+    with patch.object(form_filler, "_call_gemini", return_value=fake) as mock:
+        form_filler.fill_form(schema, context={"title": "ML Eng", "company": "ACME"})
+
+    sent = mock.call_args[0][0]
+    # Les valeurs canoniques de la qa_bank doivent être visibles dans le prompt
+    assert "Disponible juin 2026" in sent
+    assert "45-55k EUR" in sent
+    assert "Citoyen UE" in sent
+
+
+def test_fill_form_without_qa_bank_works_as_before(profile_file, monkeypatch):
+    """Rétrocompat : un profil sans qa_bank doit toujours marcher."""
+    # SAMPLE_PROFILE n'a pas de qa_bank → on confirme que rien ne casse.
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+    fake = json.dumps({"field_0": "Alex"})
+    with patch.object(form_filler, "_call_gemini", return_value=fake):
+        result = form_filler.fill_form(SAMPLE_SCHEMA)
+    assert result["values"] == {"field_0": "Alex"}
+
+
 def test_get_cv_base64_reads_existing_file(tmp_path, monkeypatch):
     cv = tmp_path / "cv.pdf"
     cv.write_bytes(b"%PDF-fake-content")

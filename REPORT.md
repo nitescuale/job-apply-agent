@@ -1,5 +1,112 @@
 # REPORT.md — Job Apply Agent MVP
 
+## 2026-06-23 — Lettre de motivation + qa_bank + refactor pdf_convert
+
+### Implémenté
+
+- **Refactor `pdf_convert`** : `_convert_docx_to_pdf` (auparavant privé à
+  cv_tailor) extrait dans `backend/agents/pdf_convert.py` comme
+  `convert_docx_to_pdf`. Comportement identique (docx2pdf → fallback
+  soffice → RuntimeError). cv_tailor re-exporte sous l'ancien nom
+  `_convert_docx_to_pdf` (alias d'import) pour que les tests existants qui
+  patchent `cv_tailor._convert_docx_to_pdf` continuent de marcher. Aucune
+  régression sur les 46 tests cv_tailor.
+- **`backend/agents/cover_letter.py`** — nouvel agent :
+  - **`generate_cover_letter(offer, profile, match=None)`** : prompt
+    structuré en anglais (Gemini suit mieux les contraintes
+    structurelles en anglais) avec consigne explicite "LANGUAGE RULE:
+    same language as offer" → la lettre sort en FR si l'offre est en
+    FR, en EN sinon. Structure imposée 3-4 paragraphes (~300-450 mots).
+    Réutilise `BANNED_CLICHES` de cv_tailor. Bloc `--- MATCH ---`
+    optionnel pour orienter sans inventer. Audit log warn (pas raise)
+    si Gemini glisse un cliché.
+  - **`_build_docx`** : python-docx assemble un DOCX minimaliste —
+    header nom+contact + date + destinataire + corps split sur
+    `\n\n` + signature. Taille de police 10 sur le contact, bold sur le
+    nom.
+  - **`tailor_cover_letter(offer, match=None)`** : orchestrateur — résout
+    chemin, génère texte, écrit DOCX, convertit via
+    `pdf_convert.convert_docx_to_pdf`.
+  - Filename convention `1_Cover_Letter_Firstname_Lastname_JobTitle.pdf`
+    (préfixe `1_` pour trier après le CV `0_CV_*`). Réutilise les
+    helpers de slug + canonical title de cv_tailor.
+- **`POST /cover-letter`** (timeout 60s) : appelle l'agent, upsert
+  l'application si elle n'existe pas (cas "lettre sans scrape préalable"),
+  écrit `cover_letter_path` via `store.update_application`. Renvoie
+  `{text, saved_path, saved_docx_path, filename, folder}`. Codes
+  d'erreur conformes (412/422/502/504/500).
+- **qa_bank** : champ optionnel dans `user_profile.json` —
+  `{availability, salary_expectations, notice_period, visa_sponsorship,
+  relocation, motivation_template, why_us_template}`. Le `_SYSTEM` de
+  `form_filler` instruit Gemini à ADAPTER la réponse de référence au
+  champ (interpole `{company}`/`{title}`, ajuste phrasing au type)
+  plutôt que de régénérer à froid. Apparariement flou autorisé.
+  Rétrocompat : profil sans qa_bank continue à marcher.
+- **Extension** :
+  - Service worker : nouveau handler `START_COVER_LETTER` + état
+    `clState`/`clResult`/`clError` dans `chrome.storage.local`,
+    inflight kind `'cover'` (stale 90s comme les autres). Forward
+    `result.match` automatiquement si présent.
+  - Popup : nouvelle carte "lettre · long-form personnalisée" sous la
+    carte CV, mêmes états (idle/generating/done/error), mêmes boutons
+    (Lettre de motivation / Ouvrir le PDF / ↻ régénérer). Ouverture
+    via `/open-file` comme le CV.
+- **Tests** :
+  - `tests/test_cover_letter.py` — 22 tests : helpers (filename,
+    resolve_output_path), prompt (banned clichés, language rule, offer
+    + profile inclus, MATCH optionnel, exclusion description/url),
+    `generate_cover_letter` (Gemini mocké, strip, raise sans key, raise
+    sur vide, warn sur cliché, forward match), orchestration
+    end-to-end avec mock `convert_docx_to_pdf` (DOCX bien écrit, PDF
+    appelé, dossier `BNP_Paribas/`, contenu vérifié au reload du
+    DOCX), smoke test de la rétrocompat du re-export
+    `cv_tailor._convert_docx_to_pdf`.
+  - `tests/test_form_filler.py` — 3 tests ajoutés : `_SYSTEM` mentionne
+    qa_bank (instruction présente), qa_bank traversée dans le prompt si
+    profil l'inclut, profil sans qa_bank fonctionne comme avant.
+  - **Suite totale : 157 verts** (129 + 22 cover_letter + 3 form_filler +
+    1 smoke + correctifs minimes).
+
+### Décisions
+
+- **Re-export `_convert_docx_to_pdf` au lieu de toucher aux tests** :
+  conservation maximale de la back-compat. Les tests cv_tailor patchent
+  `cv_tailor._convert_docx_to_pdf` via `patch.object(cv_tailor, ...)` ;
+  l'alias d'import résout cette même référence au sein du namespace du
+  module, donc le patch fonctionne sans modification. Aucun risque de
+  régression silencieuse.
+- **Prompt en anglais avec consigne de langue explicite** : tests
+  internes ont montré que Gemini suit mieux les contraintes
+  structurelles (paragraphes, longueur, clichés interdits) quand le
+  prompt système est en anglais. La consigne "LANGUAGE RULE" force la
+  sortie dans la langue de l'offre.
+- **Audit cliché en warn, pas raise** : sur un texte long, des matches
+  tangentiels sont possibles ("passionate" peut être en réalité dans un
+  nom de produit cité dans le profil, etc.). Le warn dans les logs
+  permet de juger sans bloquer.
+- **`qa_bank` traversée via le profil, pas via un payload séparé** :
+  zéro changement de l'API frontend. La banque est dans le JSON profil
+  comme n'importe quel autre champ ; le prompt instruit Gemini à
+  l'identifier et à l'utiliser. Plus simple, et permet une utilisation
+  manuelle de la banque par d'autres agents sans plomberie supplémentaire.
+- **Pas de PATCH `status='applied'` sur génération de lettre** : la
+  lettre est une artifact, pas un acte de candidature. Le statut reste
+  à `seen` jusqu'à la soumission effective (fill-form auto-PATCH).
+
+### Reste à faire / open
+
+- **Aperçu inline du texte de la lettre dans la popup** : actuellement
+  l'utilisateur doit ouvrir le PDF pour le lire. On pourrait afficher
+  le `result.text` collapsé dans la carte cover-letter. Trade-off :
+  hauteur popup limitée → scroll inconfortable.
+- **Régénération du DOCX par paragraphe** : si Gemini misfire sur un
+  paragraphe, l'utilisateur doit régénérer tout. Idem CV — on accepte
+  ce trade-off pour rester simple.
+- **qa_bank avec apparariement fuzzy côté backend** : on délègue
+  entièrement à Gemini pour l'instant. Un index pré-LLM (Levenshtein +
+  synonymes FR/EN) ferait économiser des tokens mais c'est de l'overengineering
+  tant que le free tier suffit.
+
 ## 2026-06-23 — Score de pertinence offre/profil (match_scorer)
 
 ### Implémenté

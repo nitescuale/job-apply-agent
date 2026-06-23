@@ -10,6 +10,7 @@
  * Messages écoutés :
  *  - START_ANALYZE       { tabId }
  *  - START_TAILOR_CV     { offer }
+ *  - START_COVER_LETTER  { offer }
  *  - START_FILL_FORM     { tabId, context? }
  *  - PATCH_APPLICATION   { applicationId, patch: { status?, notes? } }
  *  - OPEN_TRACKER        — ouvre tracker.html dans un nouvel onglet
@@ -17,7 +18,9 @@
  *
  * Schéma de chrome.storage.local[STORAGE_KEY] :
  *  { status, result, error, applyError, fillReport,
- *    cvState, cvResult, cvError, inflight: { kind, started_at } | null }
+ *    cvState, cvResult, cvError,
+ *    clState, clResult, clError,           // cover letter
+ *    inflight: { kind, started_at } | null }
  */
 
 const BACKEND_URL = 'http://localhost:8000'
@@ -28,6 +31,7 @@ type Status =
   | 'idle' | 'scraping' | 'ready' | 'applying' | 'applied' | 'error' | 'apply-error'
 
 type CvState = 'idle' | 'generating' | 'done' | 'error'
+type ClState = 'idle' | 'generating' | 'done' | 'error'
 
 interface MatchResult {
   score: number
@@ -54,7 +58,10 @@ interface State {
   cvState: CvState
   cvResult: Record<string, unknown> | null
   cvError: string
-  inflight: { kind: 'scrape' | 'apply' | 'tailor'; started_at: number } | null
+  clState: ClState
+  clResult: Record<string, unknown> | null
+  clError: string
+  inflight: { kind: 'scrape' | 'apply' | 'tailor' | 'cover'; started_at: number } | null
 }
 
 async function getState(): Promise<Partial<State>> {
@@ -227,6 +234,35 @@ async function runTailorCv(offer: Record<string, unknown>): Promise<void> {
   }
 }
 
+async function runCoverLetter(offer: Record<string, unknown>): Promise<void> {
+  await setState({
+    clState: 'generating',
+    clError: '',
+    inflight: { kind: 'cover', started_at: Date.now() },
+  })
+  try {
+    const cur = await getState()
+    const match = cur.result?.match ?? undefined
+    const res = await fetch(`${BACKEND_URL}/cover-letter`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(match ? { offer, match } : { offer }),
+    })
+    if (!res.ok) {
+      const txt = await res.text()
+      throw new Error(`Backend ${res.status} — ${txt.slice(0, 180)}`)
+    }
+    const data = await res.json()
+    await setState({ clState: 'done', clResult: data, clError: '', inflight: null })
+  } catch (err) {
+    await setState({
+      clState: 'error',
+      clError: friendlyFetchError(err),
+      inflight: null,
+    })
+  }
+}
+
 async function runFillForm(
   tabId: number,
   context: Record<string, unknown> | null,
@@ -313,6 +349,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return false
     case 'START_TAILOR_CV':
       runTailorCv(message.offer).catch(() => {})
+      sendResponse({ ok: true })
+      return false
+    case 'START_COVER_LETTER':
+      runCoverLetter(message.offer).catch(() => {})
       sendResponse({ ok: true })
       return false
     case 'START_FILL_FORM':

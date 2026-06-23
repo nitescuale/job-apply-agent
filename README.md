@@ -1,13 +1,14 @@
 # Job Apply Agent
 
 Chrome / Firefox extension that analyses a job posting, scores it against
-your profile, tailors a fresh ATS-friendly CV (PDF) from your DOCX, fills
-the application form, and tracks every offer in a local SQLite store with
-a full-page dashboard.
+your profile, tailors a fresh ATS-friendly CV (PDF) from your DOCX,
+generates a long-form cover letter (PDF), fills the application form
+(adapting a personal QA bank for recurring questions), and tracks every
+offer in a local SQLite store with a full-page dashboard.
 
 > Click on a job posting → it scrapes, filters, scores, generates a
-> tailored CV, optionally fills the form, and records the application.
-> You review, you submit, you track everything afterwards.
+> tailored CV and a cover letter, optionally fills the form, and records
+> the application. You review, you submit, you track everything afterwards.
 
 The product UI is in French, but the codebase, docs and commit history are
 in English.
@@ -50,10 +51,17 @@ job-apply-agent/
 │   ├── agents/
 │   │   ├── job_scraper.py           Scrapling: JSON-LD → meta → text fallback
 │   │   ├── llm_extractor.py         Gemini: filters noise, structures essentials
-│   │   ├── form_filler.py           Gemini: maps form_schema + profile → values
+│   │   ├── form_filler.py           Gemini: maps form_schema + profile → values.
+│   │   │                            Adapts qa_bank canonical answers
+│   │   │                            (availability, salary, visa, ...) instead
+│   │   │                            of regenerating from scratch.
 │   │   ├── match_scorer.py          Gemini + deterministic overlap fallback:
 │   │   │                            score 0-100, matched / missing skills
-│   │   └── cv_tailor.py             python-docx in-place edits + docx2pdf → PDF
+│   │   ├── pdf_convert.py           Shared DOCX → PDF (docx2pdf → soffice).
+│   │   ├── cover_letter.py          Gemini: long-form cover letter in the
+│   │   │                            offer's language, python-docx layout,
+│   │   │                            saved next to the CV with prefix 1_.
+│   │   └── cv_tailor.py             python-docx in-place edits + pdf_convert → PDF
 │   └── data/
 │       ├── user_profile.example.json
 │       ├── user_profile.json        (gitignored, your real profile)
@@ -179,6 +187,45 @@ The PDF opens through the backend (`POST /open-file` → `os.startfile` /
 `open` / `xdg-open`) instead of `chrome.tabs.create({url: 'file://...'})`
 which Chrome and Firefox both block by default.
 
+### 3.bis. Cover letter — `POST /cover-letter`
+
+Long-form cover letter generated entirely by Gemini in the offer's
+language, saved next to the CV as a separate DOCX + PDF (prefix `1_`).
+
+```
+offer + profile + optional match (from /match-score)
+        ↓
+Gemini (response_mime_type text/plain, temperature 0.4):
+  • prompt structured in English for better adherence to constraints
+  • explicit LANGUAGE RULE: write in the SAME language as the OFFER
+    (French if the offer is in French, English otherwise — no mixing)
+  • imposed structure: 3-4 paragraphs (~300-450 words):
+      1. opening + hook
+      2. why this role (link 2-3 profile facts to specific missions)
+      3. why this company (factual; pivot back if no factual hook)
+      4. closing with availability
+  • reuses BANNED_CLICHES from cv_tailor
+  • match block forwarded → emphasise matched skills truthfully,
+    never claim a missing skill is present
+  • audit log warn (not raise) if a cliché slips through
+        ↓
+python-docx assembles a minimalist layout:
+  Name (bold) + Email · Phone · City  (10pt contact line)
+  Date + Company + Location
+  Body paragraphs (split on \n\n)
+  Signature
+        ↓
+pdf_convert.convert_docx_to_pdf — same Word/LibreOffice pipeline as
+        the CV.
+        ↓
+Saved in {cv_output_dir}/{Company_Sanitized}/:
+  1_Cover_Letter_Firstname_Lastname_JobTitle.docx
+  1_Cover_Letter_Firstname_Lastname_JobTitle.pdf
+```
+
+The popup's "Lettre de motivation" button triggers this. cover_letter
+persists `cover_letter_path` on the SQLite application row.
+
 ### 4. Form auto-fill — `POST /fill-form`
 
 ```
@@ -201,6 +248,15 @@ Auto-PATCH: if an application_id is in scope, the service worker PATCHes
 `/fill-form` is decoupled from `/scrape-job`. The idle screen exposes two
 CTAs — *Analyser l'offre* and *Remplir le formulaire* — so you can fill a
 form directly on a candidate page without scraping the offer first.
+
+The system prompt instructs Gemini to **adapt** entries from
+`profile.qa_bank` (a personal bank of canonical answers for recurring
+questions — availability, salary expectations, notice period, visa
+sponsorship, relocation, motivation/why-us templates) rather than
+regenerating cold. When a field label fuzzy-matches a bank key, the
+reference answer is interpolated with `{company}` / `{title}` and the
+phrasing is adjusted to the field type. Without a qa_bank the agent
+falls back to the previous behaviour — fully backwards-compatible.
 
 ## Local persistence
 
@@ -328,11 +384,14 @@ Temporary add-ons survive until Firefox restarts.
 5. **Adapter le CV** generates a tailored PDF in
    `{cv_output_dir}/{Company}/0_CV_Firstname_Lastname_JobTitle.pdf` and
    opens it through the OS default reader
-6. If the page contains an application form: **Postuler** (shortcut
+6. **Lettre de motivation** generates a long-form letter in the same
+   folder as `1_Cover_Letter_Firstname_Lastname_JobTitle.pdf`, in the
+   offer's language. The DOCX intermediate is kept for manual touch-ups.
+7. If the page contains an application form: **Postuler** (shortcut
    `Ctrl ↵` on Windows/Linux, `⌘ ↵` on macOS). Fields are filled
    (highlighted in amber). Successful fill auto-marks the offer as
    `applied`. You review and submit yourself.
-7. **▤ Suivi** in the TopBar opens the tracker in a new tab — full
+8. **▤ Suivi** in the TopBar opens the tracker in a new tab — full
    history grouped by company, filterable by status, with editable
    notes.
 
@@ -340,10 +399,11 @@ Temporary add-ons survive until Firefox restarts.
 
 | Method | Route                          | Description |
 |--------|--------------------------------|-------------|
-| GET    | `/health`                      | `{status, llm_available, form_filler_available, cv_tailor_available, match_scorer_available}` |
+| GET    | `/health`                      | `{status, llm_available, form_filler_available, cv_tailor_available, cover_letter_available, match_scorer_available}` |
 | POST   | `/scrape-job`                  | Body: `{job_url, job_html}` → essentials + `{llm_used, from_cache, application_id, seen_before, application_status}` |
 | POST   | `/match-score`                 | Body: `{offer}` → `{score, matched_skills, missing_skills, rationale, llm_used, application_id?}` |
 | POST   | `/tailor-cv`                   | Body: `{offer, match?}` → `{saved_path, saved_docx_path, filename, folder, edited_count, editable_count}` |
+| POST   | `/cover-letter`                | Body: `{offer, match?}` → `{text, saved_path, saved_docx_path, filename, folder}` |
 | POST   | `/fill-form`                   | Body: `{form_schema, context}` → `{values, cv_base64}` |
 | POST   | `/open-file`                   | Body: `{path}` → opens via OS reader. Validates path is under `cv_output_dir` and extension is `.pdf` / `.docx`. |
 | GET    | `/applications`                | `?status=&company=&since=&until=` filters |
@@ -356,11 +416,12 @@ Temporary add-ons survive until Firefox restarts.
 pytest -q
 ```
 
-**129 tests**:
+**157 tests**:
 - `test_job_scraper.py` — JSON-LD, `@graph`-nested JobPosting, Open Graph meta, fallback, double-encoded HTML entities
 - `test_llm_extractor.py` — mocked Gemini, malformed JSON, markdown fences
-- `test_form_filler.py` — profile loading, mocked mapping, base64 CV reader
+- `test_form_filler.py` — profile loading, mocked mapping, base64 CV reader, **qa_bank** (system prompt mentions it, bank values traverse the prompt, regression for profiles without it)
 - `test_cv_tailor.py` — slug + Title-case + ALL-CAPS preservation, canonical job title, new filename convention, section detection, `_collect_editable_in_sections`, `_parse_edits`, full orchestration with mocked Gemini + mocked PDF conversion, rogue idx protection, `BANNED_CLICHES` audit
+- `test_cover_letter.py` — filename / output path, prompt structure (banned clichés instruction, LANGUAGE RULE, offer/profile/match content, PII exclusion), `generate_cover_letter` (Gemini mocked, strip, raise without key, raise on empty, warn on cliché), end-to-end orchestration with mocked Gemini + mocked `pdf_convert.convert_docx_to_pdf` (DOCX written, PDF called, company subfolder, content verified by reloading the DOCX), back-compat smoke test for the `cv_tailor._convert_docx_to_pdf` alias
 - `test_match_scorer.py` — `is_available`, clamp `[0, 100]`, normalisation, profile skills extraction (list / dict-by-category), overlap fallback (partial / full / zero / no offer skills / accents / dedup), LLM path mocked (clean JSON, fences, clamps high / low / non-numeric, truncated rationale, missing keys), cascade fallback on LLM failure / RuntimeError / non-dict response
 - `test_store.py` — SQLite init idempotency, hash determinism + normalisation, upsert dedup + status preservation, COALESCE behaviour, list filters, PATCH partial + validation, cache miss / hit / upsert / unicode
 
