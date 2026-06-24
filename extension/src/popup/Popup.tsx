@@ -67,12 +67,31 @@ interface FillReport {
   skipped: { id: string; reason: string }[]
 }
 
+interface AtsCheck {
+  name: string
+  passed: boolean
+  detail: string
+  weight?: number
+  partial_score?: number
+}
+
+interface AtsReport {
+  ats_score: number
+  checks: AtsCheck[]
+  suggestions: string[]
+  matched_skills?: string[]
+  missing_skills?: string[]
+  page_count?: number
+  text_length?: number
+}
+
 interface CvResult {
   saved_path: string
   filename: string
   folder: string
   markdown?: string
   summary_used?: boolean
+  ats?: AtsReport
 }
 
 interface CoverLetterResult {
@@ -415,6 +434,94 @@ const STYLES = `
     align-items: center;
     gap: 8px;
   }
+
+  /* ats badge + panel */
+  .ja-ats-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .ja-ats-badge {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.02em;
+    padding: 3px 9px;
+    border-radius: 7px;
+    background: var(--ac-soft);
+    color: var(--ac);
+    border: 1px solid transparent;
+    font-variant-numeric: tabular-nums;
+  }
+  .ja-ats-badge.weak { background: var(--bad-soft); color: var(--bad); }
+  .ja-ats-badge.mid { background: #f5ebd9; color: #b88a3f; }
+  .ja-ats-toggle {
+    background: none;
+    border: none;
+    padding: 0;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--mut);
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-color: var(--line);
+    text-underline-offset: 3px;
+  }
+  .ja-ats-toggle:hover { color: var(--ink); text-decoration-color: var(--mut); }
+  .ja-ats-panel {
+    margin-top: 8px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--bg);
+    padding: 10px 12px;
+  }
+  .ja-ats-section-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    color: var(--mut);
+    text-transform: lowercase;
+    margin: 0 0 6px;
+  }
+  .ja-ats-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #54564d;
+  }
+  .ja-ats-list li {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .ja-ats-list li::before {
+    content: '·';
+    color: var(--faint);
+    flex-shrink: 0;
+  }
+  .ja-ats-checks {
+    margin-top: 10px;
+  }
+  .ja-ats-check {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--mut);
+    margin-bottom: 3px;
+  }
+  .ja-ats-mark {
+    font-family: var(--mono);
+    font-size: 11px;
+    width: 14px;
+    flex-shrink: 0;
+    text-align: center;
+  }
+  .ja-ats-mark.ok { color: var(--ac); }
+  .ja-ats-mark.ko { color: var(--bad); }
   .ja-company {
     display: flex;
     align-items: center;
@@ -875,6 +982,75 @@ function scoreVariant(score: number): '' | 'mid' | 'weak' {
   if (score >= 70) return ''
   if (score >= 45) return 'mid'
   return 'weak'
+}
+
+const ATS_CHECK_LABELS: Record<string, string> = {
+  parsability: 'texte extractible',
+  keyword_coverage: 'couverture des compétences',
+  section_experience: 'section expérience',
+  section_education: 'section formation',
+  section_skills: 'section compétences',
+  length: 'longueur 1-2 pages',
+  contact_block: 'bloc contact',
+}
+
+function AtsBadge({ ats }: { ats: AtsReport }) {
+  const [open, setOpen] = useState(false)
+  const variant = scoreVariant(ats.ats_score)
+  const hasContent =
+    ats.suggestions.length > 0 || ats.checks.length > 0
+  return (
+    <>
+      <div className="ja-ats-row">
+        <span className={`ja-ats-badge ${variant}`} title="Score ATS déterministe">
+          ATS · {ats.ats_score}/100
+        </span>
+        {hasContent && (
+          <button
+            type="button"
+            className="ja-ats-toggle"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+          >
+            {open ? 'masquer le détail' : 'voir le détail'}
+          </button>
+        )}
+      </div>
+      {open && (
+        <div className="ja-ats-panel">
+          {ats.suggestions.length > 0 && (
+            <>
+              <p className="ja-ats-section-label">
+                suggestions ({ats.suggestions.length})
+              </p>
+              <ul className="ja-ats-list">
+                {ats.suggestions.map((s, i) => (
+                  <li key={i}>{s}</li>
+                ))}
+              </ul>
+            </>
+          )}
+          <div className="ja-ats-checks">
+            <p className="ja-ats-section-label">checks</p>
+            {ats.checks.map((c) => (
+              <div key={c.name} className="ja-ats-check">
+                <span className={`ja-ats-mark ${c.passed ? 'ok' : 'ko'}`}>
+                  {c.passed ? '✓' : '✕'}
+                </span>
+                <span>
+                  <strong style={{ color: 'var(--ink)' }}>
+                    {ATS_CHECK_LABELS[c.name] || c.name}
+                  </strong>
+                  {' — '}
+                  {c.detail}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </>
+  )
 }
 
 function MatchCard({ match }: { match: MatchResult | null | undefined }) {
@@ -1427,6 +1603,7 @@ export default function Popup() {
                   ✓ Ouvrir le PDF
                 </button>
                 <div className="ja-cv-file">{cvResult.filename}</div>
+                {cvResult.ats && <AtsBadge ats={cvResult.ats} />}
                 <button className="ja-cv-regen" onClick={handleTailorCv}>
                   ↻ régénérer
                 </button>

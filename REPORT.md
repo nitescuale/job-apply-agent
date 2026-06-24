@@ -1,5 +1,109 @@
 # REPORT.md — Job Apply Agent MVP
 
+## 2026-06-23 — Lint ATS déterministe (ats_lint)
+
+### Implémenté
+
+- **`backend/agents/ats_lint.py`** — nouvel agent **déterministe** (pas
+  de LLM, conforme à la consigne). `lint_cv(pdf_path, offer)` extrait le
+  texte du PDF via **pdfminer.six** (ajoutée à `requirements.txt`, pure
+  Python, pas de binding natif) puis calcule :
+  - **parsability** : ≥ 200 chars extraits sinon flag PDF image-only ;
+  - **keyword_coverage** : intersection normalisée NFKD + ASCII +
+    lowercase entre `offer.skills` et le texte du CV. Word-boundary pour
+    les skills mono-token (évite que "Go" matche "going"), sous-chaîne
+    pour les multi-mots ("Machine Learning"). Score proportionnel à la
+    couverture (`round(ratio * 30)`) plutôt que pass/fail binaire — un
+    CV qui couvre 49% n'est pas pénalisé identique à 0%.
+  - **sections** (experience / education / skills) : scan ligne-par-ligne,
+    comparaison ASCII-upper aux `_SECTION_KEYWORDS` (FR + EN avec
+    aliases). Tolérant aux accents et aux en-têtes longs ("EXPÉRIENCE
+    PROFESSIONNELLE", "PROFESSIONAL EXPERIENCE").
+  - **length** : 1-2 pages plausible via `extract_pages` counter.
+  - **contact_block** : regex email permissive + regex téléphone avec
+    validation longueur (8-16 chiffres) pour éviter qu'un code postal
+    "75001" ou une date "2026" matche.
+- **Pondération** (somme = 100) : parsability 30, keyword_coverage 30
+  proportionnel, section_experience 8, section_education 8,
+  section_skills 6, length 8, contact_block 10.
+- **Suggestions actionnables** générées à partir des checks ratés :
+  régénérer depuis le DOCX si image-only ; lister les missing_skills (5
+  max) si coverage faible ; ajouter sections manquantes ; élaguer le CV
+  si > 2 pages ; compléter le bloc contact si email/phone manquent.
+- **Robustesse** : `lint_cv` ne lève que `FileNotFoundError` si le PDF
+  n'existe pas. Une erreur d'extraction interne (pdfminer plante sur un
+  PDF corrompu) retombe sur `(texte vide, 0 pages)` et le rapport reflète
+  proprement `parsability=False`.
+- **`POST /ats-lint`** body `{pdf_path, offer}` :
+  - **Validation chemin stricte** identique à `/open-file` : extension
+    `.pdf` ET path sous `profile.cv_output_dir`. 403 sinon.
+  - 412 si profil/cv_output_dir absent ou PDF introuvable, 504 timeout
+    30s, 500 inattendu.
+- **Auto-trigger côté service worker** : après `setState({cvState:'done',
+  cvResult: data})` dans `runTailorCv`, fetch `/ats-lint` avec
+  `data.saved_path` + l'offer. Patch `cvResult.ats` au retour. Si le
+  lint plante (backend off, etc.), warn console — le badge ne s'affiche
+  pas, le CV reste utilisable.
+- **Popup — `AtsBadge`** : pill colorée sous le filename du CV (vert ≥ 70,
+  ambre 45-69, rouge < 45). Bouton "voir le détail" déploie un panel
+  avec les suggestions actionnables + la liste des checks (✓/✕ + label
+  FR + détail). Style Atelier sobre, pas d'emoji.
+- **Tests** : `tests/test_ats_lint.py` — 28 tests. Mocks
+  `_extract_pdf` (pas besoin de fabriquer de vrais PDF en test) :
+  - helpers purs : `_normalize`, `_skill_is_present` (word-boundary,
+    accents, multi-mots) ;
+  - détection sections (FR/EN canonical, aliases, accents, ignore les
+    sections en prose non-headers) ;
+  - email + phone (formats français, rejet courts/dates) ;
+  - lint complet : sample propre → score > 80, image-only → score ≤ 20,
+    sections manquantes → suggestions correspondantes, > 2 pages → flag
+    longueur, contact manquant → flag contact, offer sans skills →
+    coverage 100, coverage 2/5 → partial_score 12, dédup des skills
+    redondants ;
+  - bornes : score toujours [0, 100], extraction qui plante → pas
+    d'exception, PDF manquant → `FileNotFoundError`, output shape garanti.
+- **Suite totale : 185 verts** (157 + 28).
+
+### Décisions
+
+- **Pure-Python pdfminer.six** plutôt que PyMuPDF / PyPDF2 / pdfplumber :
+  consigne d'une seule dépendance légère. `pdfminer.six` est pur-Python,
+  pas de wheels natifs à se traîner sur Windows/Linux, et le texte
+  extrait suffit largement pour les heuristiques déterministes.
+- **Score proportionnel pour coverage** plutôt que pass/fail à 50% :
+  évite le cliff (un CV à 49% perd 30 pts, à 50% les regagne tous). La
+  pondération `round(ratio * 30)` donne un gradient lisible.
+- **Word-boundary pour les skills mono-token** : sans ça, "Go" matcherait
+  "going" et "ongoing", "R" matcherait n'importe quoi. Multi-mots
+  ("Machine Learning") garde la sous-chaîne simple parce que les espaces
+  sont déjà normalisés et le risque de faux positif est nul.
+- **`extract_pages` pour le compteur de pages** plutôt que de compter
+  les `\f` dans `extract_text` : comportement plus stable entre versions
+  de pdfminer, négligeable en coût sur un CV 1-2 pages.
+- **Lint déclenché en série derrière `/tailor-cv` côté worker** plutôt
+  qu'en parallèle : le service worker n'a pas le `saved_path` avant que
+  `/tailor-cv` réponde. Tentative de parallélisation = race condition
+  ou complexité inutile. Le coût est de 100-300ms, invisible côté UX.
+- **Validation chemin avec `is_relative_to`** : empêche un client
+  malformé de demander `/ats-lint` sur `/etc/passwd` ou un PDF
+  arbitraire du disque. Même garde-fou que `/open-file`.
+- **Pas de persistance du `ats_score` en SQLite** : pas demandé, et la
+  pertinence du score dépend de l'offre courante (couverture des skills).
+  Sauvegarder un score figé serait trompeur en re-visite.
+
+### Reste à faire / open
+
+- **Tracker : surface du `ats_score`** : pas exposé dans la page
+  tracker. Si on veut trier les candidatures par qualité ATS de leur CV,
+  il faudrait persister + afficher.
+- **PDF avec form fields** : `pdfminer.six` ignore les champs de
+  formulaire dynamiques. Pas critique pour des CV statiques, mais à
+  garder en tête si on étend à d'autres types de docs.
+- **Heuristique date** : `_has_phone` rejette correctement les dates
+  isolées, mais une chaîne du genre `+33 (0)6 12 34 56 78 — 2026` peut
+  consommer la date dans le match téléphone (intentionnel : c'est bien
+  un numéro). Pas un bug.
+
 ## 2026-06-23 — Lettre de motivation + qa_bank + refactor pdf_convert
 
 ### Implémenté

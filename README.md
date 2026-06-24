@@ -1,10 +1,11 @@
 # Job Apply Agent
 
 Chrome / Firefox extension that analyses a job posting, scores it against
-your profile, tailors a fresh ATS-friendly CV (PDF) from your DOCX,
-generates a long-form cover letter (PDF), fills the application form
-(adapting a personal QA bank for recurring questions), and tracks every
-offer in a local SQLite store with a full-page dashboard.
+your profile, tailors a fresh ATS-friendly CV (PDF) from your DOCX, lints
+the generated PDF against ATS heuristics deterministically, generates a
+long-form cover letter (PDF), fills the application form (adapting a
+personal QA bank for recurring questions), and tracks every offer in a
+local SQLite store with a full-page dashboard.
 
 > Click on a job posting → it scrapes, filters, scores, generates a
 > tailored CV and a cover letter, optionally fills the form, and records
@@ -18,7 +19,7 @@ in English.
 ## Stack
 
 - **Extension** — React 18 + TypeScript, Vite 5 + `@crxjs/vite-plugin` (Manifest V3, Chrome + Firefox)
-- **Backend** — Python 3.11+, FastAPI, uvicorn, [Scrapling](https://github.com/D4Vinci/Scrapling) (HTML parser)
+- **Backend** — Python 3.11+, FastAPI, uvicorn, [Scrapling](https://github.com/D4Vinci/Scrapling) (HTML parser), [pdfminer.six](https://github.com/pdfminer/pdfminer.six) (pure-Python PDF text extraction for the ATS lint)
 - **Local DB** — `sqlite3` stdlib (no SQLAlchemy/Alembic, schema via `CREATE TABLE IF NOT EXISTS`, idempotent init via FastAPI `lifespan`)
 - **LLM** — Google Gemini (`google-genai`), `gemini-2.5-flash`, free tier
 - **CV pipeline** — `python-docx` edits the source DOCX in place (text of the runs is replaced, formatting/styles preserved, scope strictly limited to SUMMARY + "Relevant coursework"), then `docx2pdf` (Word COM) converts to PDF — LibreOffice headless as a fallback
@@ -58,6 +59,9 @@ job-apply-agent/
 │   │   ├── match_scorer.py          Gemini + deterministic overlap fallback:
 │   │   │                            score 0-100, matched / missing skills
 │   │   ├── pdf_convert.py           Shared DOCX → PDF (docx2pdf → soffice).
+│   │   ├── ats_lint.py              Deterministic ATS lint via pdfminer.six:
+│   │   │                            parsability + keyword coverage + sections
+│   │   │                            + length + contact, score 0-100.
 │   │   ├── cover_letter.py          Gemini: long-form cover letter in the
 │   │   │                            offer's language, python-docx layout,
 │   │   │                            saved next to the CV with prefix 1_.
@@ -186,6 +190,45 @@ the parent folder, not the filename.
 The PDF opens through the backend (`POST /open-file` → `os.startfile` /
 `open` / `xdg-open`) instead of `chrome.tabs.create({url: 'file://...'})`
 which Chrome and Firefox both block by default.
+
+### 3.ter. ATS lint — `POST /ats-lint`
+
+Deterministic — **no LLM**. Triggered automatically by the service
+worker after every successful `/tailor-cv` so the popup gets the score
+without an extra click. Uses `pdfminer.six` (pure-Python, added to
+`requirements.txt`) to extract the text and the page count from the
+generated PDF.
+
+```
+PDF path (must be under cv_output_dir, must be .pdf)
+        ↓
+pdfminer.six: extract_text → CV body, extract_pages → page count
+        ↓
+Checks (weights sum to 100):
+  • parsability       (30) — ≥ 200 chars extracted, else image-only flag
+  • keyword_coverage  (30) — proportional: round(coverage * 30)
+  • section_experience (8) — header found (EN/FR + aliases, accent-tolerant)
+  • section_education  (8) — header found
+  • section_skills     (6) — header found
+  • length             (8) — 1 or 2 pages
+  • contact_block     (10) — email + phone (8-16 digits, rejects ZIP/dates)
+        ↓
+Actionable suggestions for every failed check:
+  - regenerate from DOCX if image-only
+  - list up to 5 missing skills if coverage < 50%
+  - add the missing section headers
+  - trim to 1-2 pages
+  - complete the contact block
+        ↓
+Returns {ats_score, checks[], suggestions[], matched_skills,
+         missing_skills, page_count, text_length}
+```
+
+The popup displays a sober pill under the CV filename — green ≥ 70,
+amber 45-69, red < 45. A *voir le détail* toggle opens a panel listing
+the suggestions and every check with ✓/✕ + FR label + detail. Path
+validation mirrors `/open-file`: only `.pdf` files under
+`profile.cv_output_dir`, 403 otherwise.
 
 ### 3.bis. Cover letter — `POST /cover-letter`
 
@@ -383,7 +426,10 @@ Temporary add-ons survive until Firefox restarts.
    `Réponse positive`, `Réponse négative`)
 5. **Adapter le CV** generates a tailored PDF in
    `{cv_output_dir}/{Company}/0_CV_Firstname_Lastname_JobTitle.pdf` and
-   opens it through the OS default reader
+   opens it through the OS default reader. An ATS pill (`ATS · 78/100`)
+   appears under the filename — click *voir le détail* to see the
+   actionable suggestions (missing skills, absent sections, contact
+   block, etc.).
 6. **Lettre de motivation** generates a long-form letter in the same
    folder as `1_Cover_Letter_Firstname_Lastname_JobTitle.pdf`, in the
    offer's language. The DOCX intermediate is kept for manual touch-ups.
@@ -399,11 +445,12 @@ Temporary add-ons survive until Firefox restarts.
 
 | Method | Route                          | Description |
 |--------|--------------------------------|-------------|
-| GET    | `/health`                      | `{status, llm_available, form_filler_available, cv_tailor_available, cover_letter_available, match_scorer_available}` |
+| GET    | `/health`                      | `{status, llm_available, form_filler_available, cv_tailor_available, cover_letter_available, match_scorer_available, ats_lint_available}` |
 | POST   | `/scrape-job`                  | Body: `{job_url, job_html}` → essentials + `{llm_used, from_cache, application_id, seen_before, application_status}` |
 | POST   | `/match-score`                 | Body: `{offer}` → `{score, matched_skills, missing_skills, rationale, llm_used, application_id?}` |
 | POST   | `/tailor-cv`                   | Body: `{offer, match?}` → `{saved_path, saved_docx_path, filename, folder, edited_count, editable_count}` |
 | POST   | `/cover-letter`                | Body: `{offer, match?}` → `{text, saved_path, saved_docx_path, filename, folder}` |
+| POST   | `/ats-lint`                    | Body: `{pdf_path, offer}` → `{ats_score, checks, suggestions, matched_skills, missing_skills, page_count, text_length}` |
 | POST   | `/fill-form`                   | Body: `{form_schema, context}` → `{values, cv_base64}` |
 | POST   | `/open-file`                   | Body: `{path}` → opens via OS reader. Validates path is under `cv_output_dir` and extension is `.pdf` / `.docx`. |
 | GET    | `/applications`                | `?status=&company=&since=&until=` filters |
@@ -416,13 +463,14 @@ Temporary add-ons survive until Firefox restarts.
 pytest -q
 ```
 
-**157 tests**:
+**185 tests**:
 - `test_job_scraper.py` — JSON-LD, `@graph`-nested JobPosting, Open Graph meta, fallback, double-encoded HTML entities
 - `test_llm_extractor.py` — mocked Gemini, malformed JSON, markdown fences
 - `test_form_filler.py` — profile loading, mocked mapping, base64 CV reader, **qa_bank** (system prompt mentions it, bank values traverse the prompt, regression for profiles without it)
 - `test_cv_tailor.py` — slug + Title-case + ALL-CAPS preservation, canonical job title, new filename convention, section detection, `_collect_editable_in_sections`, `_parse_edits`, full orchestration with mocked Gemini + mocked PDF conversion, rogue idx protection, `BANNED_CLICHES` audit
 - `test_cover_letter.py` — filename / output path, prompt structure (banned clichés instruction, LANGUAGE RULE, offer/profile/match content, PII exclusion), `generate_cover_letter` (Gemini mocked, strip, raise without key, raise on empty, warn on cliché), end-to-end orchestration with mocked Gemini + mocked `pdf_convert.convert_docx_to_pdf` (DOCX written, PDF called, company subfolder, content verified by reloading the DOCX), back-compat smoke test for the `cv_tailor._convert_docx_to_pdf` alias
 - `test_match_scorer.py` — `is_available`, clamp `[0, 100]`, normalisation, profile skills extraction (list / dict-by-category), overlap fallback (partial / full / zero / no offer skills / accents / dedup), LLM path mocked (clean JSON, fences, clamps high / low / non-numeric, truncated rationale, missing keys), cascade fallback on LLM failure / RuntimeError / non-dict response
+- `test_ats_lint.py` — pure helpers (`_normalize`, `_skill_is_present` word-boundary + multi-word + accent tolerance), section detection (canonical EN/FR + aliases + accent-insensitive + rejects running prose), email + phone heuristics (FR format + reject ZIP/dates), full lint paths (solid sample, image-only flag, missing sections, > 2 pages, missing contact, empty offer skills = full coverage, proportional partial score, dedup), bounds (always 0-100, extraction error doesn't raise, missing PDF raises, output shape complete)
 - `test_store.py` — SQLite init idempotency, hash determinism + normalisation, upsert dedup + status preservation, COALESCE behaviour, list filters, PATCH partial + validation, cache miss / hit / upsert / unicode
 
 ## Supported sites

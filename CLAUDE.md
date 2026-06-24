@@ -66,6 +66,10 @@ job-apply-agent/
 │   │   ├── pdf_convert.py          DOCX -> PDF (docx2pdf -> soffice).
 │   │   │                           Extrait pour réutilisation cv_tailor +
 │   │   │                           cover_letter sans cycle d'import.
+│   │   ├── ats_lint.py             Déterministe (pas de LLM) — extrait le
+│   │   │                           PDF via pdfminer.six et calcule un score
+│   │   │                           ATS + suggestions (parsabilité, coverage
+│   │   │                           skills, sections, longueur, contact).
 │   │   ├── cover_letter.py         Gemini : génère une lettre long-form
 │   │   │                           dans la langue de l'offre, builds DOCX
 │   │   │                           via python-docx, convertit via
@@ -388,6 +392,52 @@ intégralement le texte via Gemini.
 6. **`POST /cover-letter`** body `{offer, match?}` → `{text, saved_path,
    saved_docx_path, filename, folder}`. Timeout 60s, codes standards.
 
+### 2.quinquies. `/ats-lint` — analyse ATS déterministe du PDF généré
+
+Endpoint déterministe (pas de LLM) appelé automatiquement par le service
+worker juste après `/tailor-cv` réussit. Le rapport est attaché à
+`cvResult.ats` dans `chrome.storage.local` et la popup affiche un badge
+sobre + un panneau dépliable.
+
+1. **`ats_lint.lint_cv(pdf_path, offer)`** :
+   - Extraction PDF via `pdfminer.six` (pure-Python, ajoutée en
+     dépendance dans `requirements.txt`) — `extract_text` pour le contenu,
+     `extract_pages` pour le compteur de pages.
+   - Pondération du score (somme = 100) : `parsability` 30, `keyword_coverage`
+     30 proportionnel (`round(coverage * 30)`), `section_experience` 8,
+     `section_education` 8, `section_skills` 6, `length` 8, `contact_block` 10.
+   - **Parsability** : on considère un PDF image-only si `< 200` chars
+     extraits. Suggestion immédiate de régénérer depuis le DOCX source.
+   - **Coverage** : dédup normalisée (NFKD + ASCII + lowercase) puis
+     match avec word-boundary pour les skills mono-token (évite que "Go"
+     matche "going"), sous-chaîne pour les multi-mots ("Machine Learning").
+   - **Sections** : scan ligne-par-ligne, header ≤ 60 chars + comparaison
+     ASCII-upper aux `_SECTION_KEYWORDS` (FR + EN). Tolérant aux accents
+     ("EXPÉRIENCE" matche "EXPERIENCE"). Accepte les en-têtes longs
+     ("EXPERIENCE PROFESSIONNELLE", "ACADEMIC BACKGROUND") tant que le
+     mot-clé y apparaît.
+   - **Contact** : regex permissive pour email, regex chiffre + séparateurs
+     pour téléphone avec validation longueur (8-16 chiffres pour éviter
+     que codes postaux / dates ne matchent).
+   - **Ne lève jamais** sauf `FileNotFoundError` si le PDF n'existe pas.
+     Une erreur d'extraction interne (`pdfminer` plante) → on retombe
+     sur `(texte vide, 0 pages)` et le rapport reflète une parsability=False.
+2. **`POST /ats-lint`** body `{pdf_path, offer}` :
+   - Validation chemin **stricte** : extension `.pdf` ET path sous
+     `profile.cv_output_dir` (`Path.is_relative_to`). 403 sinon.
+     Même garde-fou que `/open-file`.
+   - 412 si profil/cv_output_dir absent ou PDF introuvable, 504 timeout
+     30s, 500 inattendu.
+3. **Auto-trigger côté service worker** : après `setState({cvState:'done',
+   cvResult: data})` dans `runTailorCv`, fetch `/ats-lint` avec
+   `data.saved_path` + l'offer. Au retour, on patch `cvResult.ats`. Si
+   le lint plante (backend off, etc.), warn console — le badge ne s'affiche
+   simplement pas, le CV reste utilisable.
+4. **Popup** : `AtsBadge` rendu sous le filename du CV. Pill colorée selon
+   le score (vert ≥ 70, ambre 45-69, rouge < 45). Bouton "voir le détail"
+   déploie un panel avec les suggestions actionnables + la liste des
+   checks (✓/✕ + label FR + détail). Pas d'emoji.
+
 ### 2.quater. `qa_bank` — banque de réponses canoniques
 
 Champ optionnel `qa_bank` dans `user_profile.json` : mapping
@@ -430,7 +480,7 @@ sans devoir scraper l'offre au préalable.
 ```
 GET  /health         → {status, llm_available, form_filler_available,
                         cv_tailor_available, cover_letter_available,
-                        match_scorer_available}
+                        match_scorer_available, ats_lint_available}
 
 POST /scrape-job     body: {job_url, job_html}
                      → champs offre + {llm_used, llm_error?, from_cache,
@@ -447,6 +497,12 @@ POST /tailor-cv      body: {offer, match?: {matched_skills, missing_skills}}
 
 POST /cover-letter   body: {offer, match?: {matched_skills, missing_skills}}
                      → {text, saved_path, saved_docx_path, filename, folder}
+
+POST /ats-lint       body: {pdf_path, offer}
+                     → {ats_score, checks[], suggestions[],
+                        matched_skills, missing_skills, page_count,
+                        text_length}. Auto-déclenché par le service worker
+                        après /tailor-cv réussit.
 
 POST /fill-form      body: {form_schema, context?}
                      → {values: {field_id: value}, cv_base64?}

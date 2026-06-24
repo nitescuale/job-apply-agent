@@ -225,6 +225,31 @@ async function runTailorCv(offer: Record<string, unknown>): Promise<void> {
     }
     const data = await res.json()
     await setState({ cvState: 'done', cvResult: data, cvError: '', inflight: null })
+
+    // ATS lint déterministe sur le PDF qu'on vient de générer. Erreur
+    // silencieuse en console — un échec ici n'invalide pas le CV, on
+    // perd juste le badge. Le report est attaché à cvResult.ats pour que
+    // la popup le rende sans recharger.
+    const pdfPath = (data as { saved_path?: unknown })?.saved_path
+    if (typeof pdfPath === 'string' && pdfPath) {
+      try {
+        const lintRes = await fetch(`${BACKEND_URL}/ats-lint`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pdf_path: pdfPath, offer }),
+        })
+        if (lintRes.ok) {
+          const ats = await lintRes.json()
+          const cur = await getState()
+          const curCv = cur.cvResult
+          if (curCv) {
+            await setState({ cvResult: { ...curCv, ats } })
+          }
+        }
+      } catch (err) {
+        console.warn('ats-lint auto-trigger a échoué :', err)
+      }
+    }
   } catch (err) {
     await setState({
       cvState: 'error',

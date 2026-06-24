@@ -20,6 +20,7 @@ from backend.agents import form_filler  # noqa: E402
 from backend.agents import cv_tailor  # noqa: E402
 from backend.agents import cover_letter  # noqa: E402
 from backend.agents import match_scorer  # noqa: E402
+from backend.agents import ats_lint  # noqa: E402
 from backend import store  # noqa: E402
 
 LOG_DIR = Path(__file__).parent / "logs"
@@ -76,6 +77,11 @@ class CoverLetterRequest(BaseModel):
     match: dict | None = None
 
 
+class AtsLintRequest(BaseModel):
+    pdf_path: str
+    offer: dict
+
+
 class OpenFileRequest(BaseModel):
     path: str
 
@@ -95,6 +101,7 @@ async def health():
         "cv_tailor_available": cv_tailor.is_available(),
         "cover_letter_available": cover_letter.is_available(),
         "match_scorer_available": match_scorer.is_available(),
+        "ats_lint_available": True,  # déterministe, toujours dispo
     }
 
 
@@ -287,6 +294,61 @@ async def match_score_endpoint(request: MatchScoreRequest):
             logger.exception("match-score: persistance échouée (non bloquant)")
 
     return result
+
+
+@app.post("/ats-lint")
+async def ats_lint_endpoint(request: AtsLintRequest):
+    """Analyse déterministe d'un CV PDF pour la conformité ATS.
+
+    Pas de LLM ici. Vérifie : parsabilité du texte (vs PDF image-only),
+    couverture des `offer.skills` dans le texte du CV, présence des
+    sections expérience / formation / compétences, longueur 1-2 pages,
+    bloc contact (email + téléphone). Renvoie un score 0-100 + suggestions
+    actionnables.
+
+    Sécurité : on n'accepte QUE des chemins sous `profile.cv_output_dir`
+    et UNIQUEMENT des fichiers `.pdf`. Évite qu'un appel malformé fasse
+    lire un fichier sensible du disque.
+    """
+    p = Path(request.pdf_path).expanduser().resolve()
+
+    try:
+        profile = form_filler.load_profile()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=412, detail=str(exc))
+
+    allowed_root = (profile.get("cv_output_dir") or "").strip()
+    if not allowed_root:
+        raise HTTPException(status_code=412, detail="cv_output_dir non configuré")
+    allowed = Path(allowed_root).expanduser().resolve()
+    if not p.is_relative_to(allowed):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Chemin hors cv_output_dir: {p}",
+        )
+    if p.suffix.lower() != ".pdf":
+        raise HTTPException(status_code=403, detail=f"Extension non autorisée: {p.suffix}")
+    if not p.is_file():
+        raise HTTPException(status_code=412, detail=f"PDF introuvable: {p}")
+
+    logger.info("POST /ats-lint -> %s", p)
+    loop = asyncio.get_running_loop()
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, ats_lint.lint_cv, p, request.offer),
+            timeout=30.0,
+        )
+        return result
+    except FileNotFoundError as exc:
+        # Course inattendue : le fichier a disparu entre nos checks et
+        # l'extraction (extraordinairement rare, mais 412 reste cohérent).
+        raise HTTPException(status_code=412, detail=str(exc))
+    except asyncio.TimeoutError:
+        logger.error("ats-lint: timeout")
+        raise HTTPException(status_code=504, detail="ATS lint timeout")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("ats-lint: erreur inattendue")
+        raise HTTPException(status_code=500, detail=f"ATS lint error: {exc}")
 
 
 @app.post("/open-file")
