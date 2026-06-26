@@ -160,6 +160,136 @@ def _site_specific(page: Selector, url: str) -> dict:
     return {k: v for k, v in out.items() if v}
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# URL-based company inference (déterministe, post-LLM fallback)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+# Brands dont le hostname ne suit pas le pattern "careers.<brand>.com". On
+# matche en sous-chaîne sur le host normalisé.
+_BRAND_HOSTS: tuple[tuple[str, str], ...] = (
+    ("lifeattiktok.com", "TikTok"),
+    ("careers.tiktok.com", "TikTok"),
+    ("jobs.tiktok.com", "TikTok"),
+    ("bytedance.com", "ByteDance"),
+    ("jobs.bytedance.com", "ByteDance"),
+    ("metacareers.com", "Meta"),
+    ("careers.google.com", "Google"),
+    ("amazon.jobs", "Amazon"),
+    ("careers.microsoft.com", "Microsoft"),
+    ("jobs.apple.com", "Apple"),
+)
+
+# Patterns d'ATS hébergés : `https://jobs.lever.co/<company>/...`, etc.
+# Le premier segment de path après l'host donne le slug entreprise.
+_PATH_ATS: tuple[tuple[str, str], ...] = (
+    ("jobs.lever.co", "lever-path"),
+    ("boards.greenhouse.io", "greenhouse-path"),
+    ("job-boards.greenhouse.io", "greenhouse-path"),
+    ("apply.workable.com", "workable-path"),
+)
+
+# Patterns d'ATS où le slug est dans le sous-domaine :
+# `<company>.greenhouse.io`, `<company>.lever.co`, `<company>.workdayjobs.com`.
+_SUBDOMAIN_ATS: tuple[str, ...] = (
+    ".greenhouse.io",
+    ".lever.co",
+    ".workdayjobs.com",
+    ".myworkdayjobs.com",
+    ".recruitee.com",
+    ".teamtailor.com",
+    ".bamboohr.com",
+    ".smartrecruiters.com",
+    ".jobvite.com",
+)
+
+
+def _humanize_slug(slug: str) -> str:
+    """`tik-tok` -> `Tik Tok`, `bnp-paribas` -> `Bnp Paribas`, `bnp` -> `BNP`.
+
+    Cas acronyme : UN SEUL token court (≤ 4 chars) → upper-case (BNP, IBM,
+    EY). Multi-token → Title-case par token, sinon on transformerait
+    "tik-tok" en "TIK TOK".
+    """
+    parts = re.split(r"[-_]+", slug)
+    parts = [p for p in parts if p]
+    if not parts:
+        return ""
+    if len(parts) == 1 and len(parts[0]) <= 4:
+        return parts[0].upper()
+    return " ".join(p[:1].upper() + p[1:].lower() for p in parts)
+
+
+def infer_company_from_url(url: str | None) -> str | None:
+    """Devine le nom de l'entreprise depuis l'URL d'une offre, déterministe.
+
+    Stratégie en cascade :
+      1. brands hardcodés (lifeattiktok.com -> TikTok, metacareers.com -> Meta...)
+      2. ATS hébergés sur un path (jobs.lever.co/<X>/ -> X)
+      3. ATS hébergés sur un sous-domaine (<X>.greenhouse.io -> X)
+      4. hostnames `careers.<X>.com` / `jobs.<X>.com` / `work.<X>.com` -> X
+    Renvoie None si aucun pattern ne matche — on ne devine pas au hasard.
+    """
+    if not url:
+        return None
+    try:
+        parsed = urlparse(url)
+    except (ValueError, AttributeError):
+        return None
+    host = (parsed.hostname or "").lower().lstrip(".")
+    path = parsed.path or ""
+    if not host:
+        return None
+
+    # 1. brands hardcodés (matche en sous-chaîne pour tolérer www., m., etc.)
+    for needle, brand in _BRAND_HOSTS:
+        if needle in host:
+            return brand
+
+    # 2. ATS path-based : on prend le 1er segment du path
+    for needle, _kind in _PATH_ATS:
+        if host.endswith(needle):
+            segments = [s for s in path.split("/") if s]
+            if segments:
+                return _humanize_slug(segments[0])
+
+    # 3. ATS subdomain-based : le slug est avant le suffixe ATS
+    for suffix in _SUBDOMAIN_ATS:
+        if host.endswith(suffix):
+            slug = host[: -len(suffix)]
+            # Cas Workday : `docusign.wd1.myworkdayjobs.com` -> slug=
+            # `docusign.wd1`. On prend le segment le plus à gauche (le
+            # nom de l'organisation, le reste est l'instance Workday).
+            if "." in slug:
+                slug = slug.split(".")[0]
+            # Pour `boards.greenhouse.io` (déjà géré en path), on aurait
+            # `boards` ici — on skip si le slug ressemble à un mot générique
+            if slug and slug not in {"boards", "jobs", "www", "apply", "careers"}:
+                return _humanize_slug(slug)
+
+    # 4. `careers.<X>.com`, `jobs.<X>.com`, etc.
+    # On exclut le préfixe SI le reste est un host ATS connu, sinon on
+    # transformerait `jobs.lever.co` en "Lever" alors qu'on n'a pas de
+    # signal sur l'organisation cliente.
+    _ATS_HOSTS_TAIL = (
+        "lever.co", "greenhouse.io", "workable.com", "workdayjobs.com",
+        "myworkdayjobs.com", "recruitee.com", "teamtailor.com",
+        "bamboohr.com", "smartrecruiters.com", "jobvite.com",
+    )
+    for prefix in ("careers.", "jobs.", "work.", "join."):
+        if host.startswith(prefix):
+            rest = host[len(prefix):]
+            if any(rest == t or rest.endswith("." + t) for t in _ATS_HOSTS_TAIL):
+                # `jobs.lever.co` : pas de signal sans path → on s'abstient
+                return None
+            # On garde le 2e niveau du domaine : `tiktok.com` -> `tiktok`
+            parts = rest.split(".")
+            if len(parts) >= 2 and parts[0] not in {"www", ""}:
+                return _humanize_slug(parts[0])
+
+    return None
+
+
 def scrape_job(html: str, url: str = "") -> dict[str, Any]:
     """Extrait les infos pratiques d'une offre d'emploi depuis le HTML rendu.
 

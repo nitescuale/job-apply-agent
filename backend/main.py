@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 load_dotenv()
 
-from backend.agents.job_scraper import scrape_job  # noqa: E402
+from backend.agents.job_scraper import scrape_job, infer_company_from_url  # noqa: E402
 from backend.agents import llm_extractor  # noqa: E402
 from backend.agents import form_filler  # noqa: E402
 from backend.agents import cv_tailor  # noqa: E402
@@ -451,6 +451,13 @@ async def scrape_job_endpoint(request: ScrapeRequest):
     cached = store.get_cached_scrape(job_hash)
     if cached is not None:
         logger.info("scrape-job: cache hit pour %s", job_hash[:12])
+        # Rescue : si l'entrée cachée (probablement pré-fix) n'a pas de
+        # company, tente l'inférence URL avant de l'utiliser. Évite que
+        # les vieux caches perpétuent un Unknown_Company.
+        if not cached.get("company"):
+            inferred = infer_company_from_url(request.job_url)
+            if inferred:
+                cached["company"] = inferred
         app_id, was_new = store.upsert_application(
             job_hash,
             job_url=request.job_url,
@@ -491,6 +498,22 @@ async def scrape_job_endpoint(request: ScrapeRequest):
 
     # 5. Réaffirme l'URL (défense contre un éventuel override Gemini)
     result["url"] = request.job_url
+
+    # 5.bis. Fallback déterministe : si l'entreprise est encore vide après
+    # toute la cascade (JSON-LD + meta + selectors + LLM), tente une
+    # inférence depuis le hostname de l'URL (lifeattiktok.com -> TikTok,
+    # jobs.lever.co/X -> X, X.greenhouse.io -> X, careers.X.com -> X).
+    # Évite que le CV finisse dans `Unknown_Company/`.
+    if not result.get("company"):
+        inferred = infer_company_from_url(request.job_url)
+        if inferred:
+            result["company"] = inferred
+            logger.info("scrape-job: company inférée depuis URL -> %s", inferred)
+            # Recompute le hash maintenant qu'on a une company → la dédup
+            # converge sur la même clé qu'une visite future.
+            job_hash = store.compute_job_hash(
+                result.get("title"), inferred, result.get("location"),
+            )
 
     # 6. Cache + upsert tracking
     store.save_scrape_cache(job_hash, result)

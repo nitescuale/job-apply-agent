@@ -1,7 +1,11 @@
 """Tests pour backend/agents/job_scraper.py."""
 import pytest
 
-from backend.agents.job_scraper import scrape_job
+from backend.agents.job_scraper import (
+    _humanize_slug,
+    infer_company_from_url,
+    scrape_job,
+)
 
 
 JSONLD_HTML = """
@@ -129,3 +133,72 @@ def test_scrape_malformed_jsonld_does_not_crash():
     """
     r = scrape_job(html, url="https://x.com/")
     assert r["title"] == "Page Title"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# infer_company_from_url — fallback déterministe quand le LLM cale
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        # Brands hardcodés
+        ("https://lifeattiktok.com/positions/12345", "TikTok"),
+        ("https://www.lifeattiktok.com/job/abc", "TikTok"),
+        ("https://careers.tiktok.com/position/42", "TikTok"),
+        ("https://jobs.bytedance.com/en/job/xyz", "ByteDance"),
+        ("https://www.metacareers.com/jobs/123", "Meta"),
+        ("https://careers.google.com/jobs/results/123", "Google"),
+        ("https://www.amazon.jobs/en/jobs/456", "Amazon"),
+        # ATS path-based : segment de path = entreprise
+        ("https://jobs.lever.co/openai/some-role", "Openai"),
+        ("https://boards.greenhouse.io/airbnb/jobs/4123", "Airbnb"),
+        # ATS subdomain-based : sous-domaine = entreprise
+        ("https://stripe.greenhouse.io/job/1234", "Stripe"),
+        ("https://figma.lever.co/positions/xyz", "Figma"),
+        ("https://docusign.wd1.myworkdayjobs.com/External", "Docusign"),
+        # Patterns careers./jobs.<X>.com
+        ("https://careers.shopify.com/job/123", "Shopify"),
+        ("https://jobs.netflix.com/jobs/456", "Netflix"),
+        ("https://work.deezer.com/positions", "Deezer"),
+        # Acronymes courts en MAJ préservés (≤ 4 chars par token)
+        ("https://careers.bnp.com/job/x", "BNP"),
+        ("https://careers.ibm.com/job/x", "IBM"),
+    ],
+)
+def test_infer_company_from_url_returns_brand(url, expected):
+    assert infer_company_from_url(url) == expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # URL générique : pas de fallback → None (on ne devine pas au hasard)
+        "https://example.com/jobs/123",
+        "https://www.linkedin.com/jobs/view/456",
+        "https://en.wikipedia.org/wiki/anything",
+        "",
+        None,
+        "not even a url",
+    ],
+)
+def test_infer_company_from_url_returns_none_when_unclear(url):
+    assert infer_company_from_url(url) is None
+
+
+def test_infer_company_skips_generic_subdomain_slugs():
+    """`boards.greenhouse.io` est géré par le path, pas le subdomain →
+    on ne doit pas renvoyer 'Boards' depuis le sous-domaine."""
+    # Sans path utile, on retombe sur None plutôt que 'Boards'.
+    assert infer_company_from_url("https://boards.greenhouse.io/") is None
+    assert infer_company_from_url("https://jobs.lever.co/") is None
+
+
+def test_humanize_slug_handles_acronyms_and_kebab():
+    assert _humanize_slug("openai") == "Openai"
+    assert _humanize_slug("ey") == "EY"
+    assert _humanize_slug("ibm") == "IBM"
+    assert _humanize_slug("bnp-paribas") == "Bnp Paribas"
+    assert _humanize_slug("tik-tok") == "Tik Tok"
+    assert _humanize_slug("") == ""

@@ -165,6 +165,12 @@ async function runAnalyze(tabId: number): Promise<void> {
     // score de pertinence. On l'attache à `result.match` pour que le popup
     // l'affiche dès qu'il arrive. Erreur silencieuse en console — la jauge
     // reste cachée plutôt que de planter l'analyse principale.
+    //
+    // IMPORTANT : on settle TOUJOURS `match` à un score OU à `null` (jamais
+    // laisser `undefined`). Sinon la popup montre le placeholder "Calcul du
+    // score…" indéfiniment quand le backend renvoie non-OK (504, 502) ou
+    // que le fetch throw. Avec `null` la MatchCard masque proprement.
+    let match: MatchResult | null = null
     try {
       const offerForMatch = {
         title: data.title,
@@ -182,15 +188,18 @@ async function runAnalyze(tabId: number): Promise<void> {
         body: JSON.stringify({ offer: offerForMatch }),
       })
       if (mr.ok) {
-        const match = await mr.json()
-        const cur = await getState()
-        const curResult = cur.result
-        if (curResult) {
-          await setState({ result: { ...curResult, match } })
-        }
+        match = (await mr.json()) as MatchResult
+      } else {
+        console.warn('match-score auto-trigger non-OK:', mr.status)
       }
     } catch (err) {
       console.warn('match-score auto-trigger a échoué :', err)
+    }
+    // Settle dans tous les cas (score | null) — la popup arrête le spinner.
+    const curAfter = await getState()
+    const curResultAfter = curAfter.result
+    if (curResultAfter) {
+      await setState({ result: { ...curResultAfter, match } })
     }
   } catch (err) {
     await setState({

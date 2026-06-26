@@ -1057,7 +1057,23 @@ function MatchCard({ match }: { match: MatchResult | null | undefined }) {
   // match=undefined → en cours de calcul (background a fini scrape, fetch
   // match-score en vol). match=null ou objet → on rend la carte. Pas de
   // carte si l'utilisateur n'est pas sur "ready" avec un scrape complet.
+  //
+  // Garde-fou : si on reste "pending" plus de 30s (worker MV3 tué pendant
+  // le fetch, par ex.), on masque le placeholder. Sans ça la popup montre
+  // "Calcul du score…" indéfiniment. Le score s'affichera quand même si
+  // un re-mount tombe sur un match déjà settlé dans chrome.storage.
+  const [timedOut, setTimedOut] = useState(false)
+  useEffect(() => {
+    if (match !== undefined) {
+      setTimedOut(false)
+      return
+    }
+    const t = window.setTimeout(() => setTimedOut(true), 30_000)
+    return () => window.clearTimeout(t)
+  }, [match])
+
   if (match === undefined) {
+    if (timedOut) return null
     return (
       <div className="ja-match">
         <div className="ja-match-head">

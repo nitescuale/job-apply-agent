@@ -1,5 +1,96 @@
 # REPORT.md — Job Apply Agent MVP
 
+## 2026-06-26 — Fix score-stuck + détection entreprise par URL
+
+### Bugs reportés
+
+1. La carte "score de pertinence" reste sur le placeholder "Calcul du
+   score…" indéfiniment quand l'auto-trigger échoue (504 timeout, 502
+   LLM, réseau, ou service worker MV3 tué pendant le fetch).
+2. L'entreprise n'est pas détectée alors qu'elle est évidente depuis
+   l'URL (cas concret : offre TikTok dont le titre est `Deep Learning
+   Algorithm Graduate (TikTok Search Ranking)`, scrape qui finit avec
+   `company=null` et CV sauvegardé dans `Unknown_Company/`).
+
+### Implémenté
+
+- **`background.ts runAnalyze`** : la branche match-score était
+  asymétrique — on patchait `result.match` UNIQUEMENT si `mr.ok`. Du
+  coup non-OK ou throw laissait `result.match === undefined` ad vitam,
+  ce que la `MatchCard` rend comme un spinner permanent. Fix :
+  `match` est une variable locale typée `MatchResult | null`
+  initialisée à `null`, écrasée par le score si succès, et on appelle
+  `setState({result: {...curResult, match}})` **dans tous les cas**
+  (succès, non-OK, catch). Spinner s'éteint proprement.
+- **`Popup.tsx MatchCard`** : garde-fou supplémentaire si le worker
+  meurt entre le scrape et le settle du match (cas où le catch ne
+  s'exécute jamais). `useEffect` qui démarre un `setTimeout(30s)` quand
+  `match === undefined`, set un état local `timedOut`, et coerce
+  `null` au rendu si timeout. Reset si `match` arrive avant les 30s.
+- **`backend/agents/job_scraper.py infer_company_from_url(url)`** :
+  fallback déterministe en cascade quand structural + LLM ont laissé
+  `company` vide.
+  - Brands hardcodés en sous-chaîne (`lifeattiktok.com → TikTok`,
+    `metacareers.com → Meta`, `careers.google.com → Google`,
+    `amazon.jobs → Amazon`, `bytedance.com → ByteDance`...).
+  - ATS path-based : `jobs.lever.co/<X>/...` ou
+    `boards.greenhouse.io/<X>/...` → 1er segment de path.
+  - ATS subdomain-based : `<X>.greenhouse.io`, `<X>.lever.co`,
+    `<X>.myworkdayjobs.com`, `<X>.recruitee.com`, etc. Cas Workday géré
+    : `docusign.wd1.myworkdayjobs.com → Docusign` (on prend le segment
+    le plus à gauche du slug avant l'instance Workday).
+  - Préfixes génériques : `careers.<X>.com`, `jobs.<X>.com`,
+    `work.<X>.com`, `join.<X>.com` → 2e niveau du domaine. **Garde-fou** :
+    on s'abstient si `rest` est lui-même un host ATS (sinon
+    `jobs.lever.co/` renverrait "Lever" sans avoir vu d'organisation).
+  - `_humanize_slug` : kebab/underscore → Title-case par token, sauf
+    cas single-token court (≤ 4 chars) où on uppercase (BNP, IBM, EY).
+    Évite que `tik-tok` devienne `TIK TOK` (matche les deux tokens
+    courts) — règle restreinte à un seul token.
+- **`backend/main.py POST /scrape-job`** : appelle
+  `infer_company_from_url(request.job_url)` dans les deux branches :
+  - **Cache miss** : après le merge LLM, si `result["company"]` est vide,
+    on rescue depuis l'URL et on recompute `job_hash` (la dédup converge
+    sur la même clé qu'une visite future).
+  - **Cache hit** : on rescue les vieilles entrées de cache qui avaient
+    `company=null` (pré-fix). La ligne `applications` reçoit le bon nom
+    et le CV ne tombe plus dans `Unknown_Company/`.
+- **Tests** : `tests/test_job_scraper.py` — 25 nouveaux tests
+  paramétrés sur `infer_company_from_url` (brands hardcodés, ATS
+  path-based, ATS subdomain, careers./jobs. prefixes, acronymes courts,
+  rejet des hosts génériques sans signal) + 1 test sur
+  `_humanize_slug`. Suite : **210 verts** (185 + 25). tsc clean.
+
+### Décisions
+
+- **Spinner se settle TOUJOURS**, pas de "pending" indéfini. Coût d'un
+  champ `match: null` dans le storage : nul. Bénéfice UX : l'utilisateur
+  voit immédiatement si quelque chose ne va pas (badge absent = analyse
+  partielle, badge présent = OK).
+- **URL inference déterministe plutôt que renforcer le prompt LLM**. Le
+  prompt Gemini reste sur "n'invente jamais" — ce qu'on veut. Le rescue
+  est explicite, lisible, testable, et ne dépend pas du Gemini du jour.
+- **Recompute du hash après inférence** : sans ça, la même offre
+  re-scrappée plus tard convergerait sur une CLÉ DIFFÉRENTE (avec
+  company détectée par URL au lieu de null), créant deux lignes
+  `applications`. Le recompute garantit la convergence.
+- **Cache-hit branch patchée aussi** : rescue les vieilles entrées sans
+  attendre que l'utilisateur force un refresh. Pas de migration de
+  table nécessaire.
+- **Cas spécifique LinkedIn ignoré** : `linkedin.com/jobs/view/...` ne
+  donne pas d'entreprise dans l'URL. C'est attendu — LinkedIn a son
+  propre selector site-specific qui marche déjà.
+
+### Reste à faire / open
+
+- **Page tracker : voir le badge "company inférée par URL"** : pas
+  prioritaire, mais signaler à l'utilisateur que la company n'est pas
+  100 % sûre permettrait de corriger via le dropdown notes.
+- **Backfill des anciennes lignes `applications`** avec `company=null`
+  : le cache-hit branch rescue à la prochaine visite, mais on pourrait
+  faire un script one-shot. Pas urgent — la dédup s'auto-réconcilie au
+  prochain scrape de chaque offre.
+
 ## 2026-06-23 — Lint ATS déterministe (ats_lint)
 
 ### Implémenté
