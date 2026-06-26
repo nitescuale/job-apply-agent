@@ -10,6 +10,7 @@
   "portfolio": "",
   "current_title": "Data Scientist",
   "years_experience": 3,
+  "experience_context": "3 années d'alternance pendant mes études (Bachelor + Master). Je suis fraîchement diplômé (entry-level / graduate), pas senior — l'expérience a été acquise EN PARALLÈLE des études, pas après le diplôme.",
   "education_level": "Master",
   "education_field": "Informatique",
   "school": "Nom de ton école",
@@ -34,5 +35,5 @@
   "cv_path": "",
   "base_cv_path": "",
   "cv_output_dir": "",
-  "_comment": "Copier ce fichier en user_profile.json (gitignoré). cv_path = PDF prêt-à-upload (peut rester vide, on génère). base_cv_path = chemin absolu vers ton DOCX source (.docx requis, .doc legacy non supporté). cv_output_dir = dossier racine où les CV et lettres adaptés seront générés (ex: C:/Users/Alex/Documents/CVs). Le pipeline /tailor-cv édite ce DOCX en place puis convertit en PDF, /cover-letter génère une lettre long-form et la sauve en 1_Cover_Letter_*. qa_bank est une banque de réponses canoniques aux questions récurrentes des formulaires (disponibilité, salaire, visa...). form_filler adapte ces réponses au contexte plutôt que de les régénérer à froid."
+  "_comment": "Copier ce fichier en user_profile.json (gitignoré). cv_path = PDF prêt-à-upload (peut rester vide, on génère). base_cv_path = chemin absolu vers ton DOCX source (.docx requis, .doc legacy non supporté). cv_output_dir = dossier racine où les CV et lettres adaptés seront générés (ex: C:/Users/Alex/Documents/CVs). Le pipeline /tailor-cv édite ce DOCX en place puis convertit en PDF, /cover-letter génère une lettre long-form et la sauve en 1_Cover_Letter_*. qa_bank est une banque de réponses canoniques aux questions récurrentes des formulaires (disponibilité, salaire, visa...). form_filler adapte ces réponses au contexte plutôt que de les régénérer à froid. experience_context est optionnel — il qualifie years_experience pour le scoring : 'alternance/apprentissage/stages pendant les études' évite que le LLM marque un jeune diplômé comme surqualifié pour un poste graduate. Sans ce champ, years_experience est interprété comme de l'expérience post-diplôme classique."
 }

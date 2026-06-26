@@ -28,7 +28,7 @@ _SYSTEM = """Tu évalues l'adéquation entre une offre d'emploi et un profil can
 
 Tu reçois :
 - L'offre (title, company, missions, skills requis, summary, ...).
-- Le profil (current_title, years_experience, education, skills, summary).
+- Le profil (current_title, years_experience, experience_context, education, skills, summary).
 
 Tu renvoies UNIQUEMENT un objet JSON avec exactement ces clés :
 - score: entier entre 0 et 100 (100 = adéquation parfaite, 0 = aucun recouvrement).
@@ -41,7 +41,24 @@ Règles strictes :
 - Reformule les skills tels qu'écrits dans l'offre (ex : "PyTorch" si l'offre dit PyTorch).
 - Si l'offre n'a pas de skills explicites, infère raisonnablement depuis missions/title.
 - Le score pondère skills + expérience + éducation. Ne descends pas sous 30 sans raison forte.
-- Réponds avec le JSON seul, sans texte ni balises autour."""
+
+LECTURE DE L'EXPÉRIENCE — règle critique :
+- `years_experience` SEUL ne dit pas si l'expérience est post-diplôme ou
+  acquise pendant les études. Lis TOUJOURS `experience_context` s'il est
+  présent.
+- Une expérience acquise PENDANT les études (alternance, apprentissage,
+  stages longs, contrats étudiants) NE FAIT PAS du candidat un senior.
+  Un profil avec 3 ans d'alternance qui sort fraîchement d'école est
+  entry-level / new-grad / junior — c'est un EXCELLENT FIT pour des
+  postes "graduate", "new grad", "junior", "entry-level", "intern-to-
+  full-time", JAMAIS "surqualifié".
+- Ne pénalise PAS un candidat junior fraîchement diplômé sur un poste
+  graduate parce qu'il a 3 ans d'expérience apprenante — au contraire,
+  c'est un avantage.
+- À l'inverse, sans `experience_context` explicite, traite
+  `years_experience` comme du post-diplôme classique.
+
+Réponds avec le JSON seul, sans texte ni balises autour."""
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -170,10 +187,14 @@ def _profile_for_llm(profile: dict[str, Any]) -> dict[str, Any]:
     """Sous-ensemble du profil utile au scoring — réduit la consommation de tokens.
 
     On ne passe pas email, téléphone, cv_path, etc. Inutile et c'est du PII.
+    `experience_context` est passé si présent — qualifie `years_experience`
+    pour éviter qu'un junior fraîchement diplômé avec X ans d'alternance
+    soit traité comme un senior (cf. règle dans `_SYSTEM`).
     """
     return {
         "current_title": profile.get("current_title"),
         "years_experience": profile.get("years_experience"),
+        "experience_context": profile.get("experience_context"),
         "education_level": profile.get("education_level"),
         "education_field": profile.get("education_field"),
         "school": profile.get("school"),

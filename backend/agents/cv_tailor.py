@@ -89,6 +89,16 @@ NEVER use these clichés (even once): passionate, driven, hard-working,
 team player, fast learner, hit the ground running, always on the
 lookout, results-oriented, self-motivated.
 
+EXPERIENCE INTERPRETATION:
+- The PROFILE may include an `experience_context` field that qualifies
+  `years_experience` (e.g. "3 years of apprenticeship during studies,
+  freshly graduated"). When present, treat the candidate accordingly:
+  apprenticeship / internship / work-study experience acquired DURING
+  studies does NOT make the candidate senior. Frame summary/coursework
+  rewrites consistent with that level (entry-level / new-grad / junior)
+  rather than as a senior IC. Never overclaim seniority the candidate
+  does not have.
+
 Output a STRICT JSON object. Keys are paragraph indices (as strings).
 Values are the rewritten text. Omit a key if you choose to keep that
 paragraph verbatim. No fences, no preamble — JSON only."""

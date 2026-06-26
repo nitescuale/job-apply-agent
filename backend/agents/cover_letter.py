@@ -68,6 +68,18 @@ Structure (3-4 paragraphs, ~300-450 words):
      market). If no factual hook, keep it short and pivot to the role.
   4. Closing — availability + invitation to continue the conversation.
 
+EXPERIENCE INTERPRETATION — critical rule:
+- `years_experience` alone does not say whether the experience was
+  acquired post-graduation or during studies. ALWAYS read
+  `experience_context` when present.
+- Experience acquired DURING studies (apprenticeship/alternance,
+  internships, work-study contracts) does NOT make the candidate a
+  senior. A profile with 3 years of apprenticeship who just graduated
+  is entry-level / new-grad / junior — frame the letter accordingly.
+- For graduate / new-grad / entry-level / junior roles, present this
+  apprenticeship experience as a STRENGTH (practical experience while
+  studying) rather than pretending to be senior.
+
 LANGUAGE RULE: write the entire letter in the SAME language as the OFFER
 (title + summary). If the offer is in French, write in French. If in
 English, in English. NEVER mix languages and NEVER translate the offer.
@@ -117,12 +129,18 @@ def _call_gemini(prompt: str) -> str:
 def _profile_for_llm(profile: dict[str, Any]) -> dict[str, Any]:
     """Sous-ensemble du profil utile pour la lettre. Exclut le PII non
     nécessaire (cv_path, base_cv_path) et la lettre type (pour éviter que
-    Gemini la recopie au lieu de générer)."""
+    Gemini la recopie au lieu de générer).
+
+    `experience_context` est passé si présent — qualifie `years_experience`
+    pour éviter qu'un junior fraîchement diplômé avec X ans d'alternance
+    soit présenté comme senior dans la lettre (cf. règle dans `_SYSTEM`).
+    """
     return {
         "first_name": profile.get("first_name"),
         "last_name": profile.get("last_name"),
         "current_title": profile.get("current_title"),
         "years_experience": profile.get("years_experience"),
+        "experience_context": profile.get("experience_context"),
         "education_level": profile.get("education_level"),
         "education_field": profile.get("education_field"),
         "school": profile.get("school"),
