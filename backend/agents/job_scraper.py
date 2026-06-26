@@ -60,10 +60,36 @@ def _strip_html(s: Any) -> str | None:
     return text or None
 
 
-def _org_name(value: Any) -> str | None:
+def _coerce_str(value: Any) -> str | None:
+    """Best-effort extraction d'une string depuis un champ Schema.org.
+
+    Schema.org permet à la plupart des champs string d'être renvoyés
+    comme un object qualifié `{"@type": "Country", "name": "France"}` ou
+    une liste `["FULL_TIME"]`. On déballe jusqu'à trouver une string
+    propre. Sans ça, des appels comme `", ".join(...)` plantent en
+    'sequence item 0: expected str instance, dict found' (cf. cas Indeed
+    et plusieurs ATS Workday).
+    """
+    if isinstance(value, list) and value:
+        value = value[0]
     if isinstance(value, dict):
-        return value.get("name")
-    return value if isinstance(value, str) else None
+        # Schema.org : `name` est la convention. Quelques sites mettent
+        # le texte directement dans `value` ou `@id`.
+        for key in ("name", "value", "@id"):
+            v = value.get(key)
+            if isinstance(v, str):
+                s = v.strip()
+                if s:
+                    return s
+        return None
+    if isinstance(value, str):
+        s = value.strip()
+        return s or None
+    return None
+
+
+def _org_name(value: Any) -> str | None:
+    return _coerce_str(value)
 
 
 def _location(value: Any) -> str | None:
@@ -71,12 +97,25 @@ def _location(value: Any) -> str | None:
         value = value[0]
     if isinstance(value, dict):
         addr = value.get("address")
+        if isinstance(addr, list) and addr:
+            addr = addr[0]
         if isinstance(addr, dict):
-            parts = [addr.get("addressLocality"), addr.get("addressRegion"), addr.get("addressCountry")]
+            # IMPORTANT : chacun de ces champs peut être string OU objet
+            # {"@type": "Country", "name": "..."}. Sans _coerce_str on
+            # passe un dict à `", ".join(...)` -> TypeError 500.
+            parts = [
+                _coerce_str(addr.get("addressLocality")),
+                _coerce_str(addr.get("addressRegion")),
+                _coerce_str(addr.get("addressCountry")),
+            ]
             joined = ", ".join(p for p in parts if p)
             return joined or None
-        return value.get("name")
-    return value if isinstance(value, str) else None
+        if isinstance(addr, str):
+            s = addr.strip()
+            return s or None
+        # Pas d'`address` exploitable — on tente le `name` du Place
+        return _coerce_str(value.get("name"))
+    return _coerce_str(value)
 
 
 def _salary(value: Any) -> str | None:
@@ -98,14 +137,20 @@ def _salary(value: Any) -> str | None:
 
 
 def _from_jsonld(jp: dict) -> dict:
-    """Mappe un JobPosting JSON-LD vers notre format de retour."""
+    """Mappe un JobPosting JSON-LD vers notre format de retour.
+
+    Tous les champs string passent par `_coerce_str` parce que Schema.org
+    autorise un object ou une liste là où on attend une string. Sans ça,
+    `title=["Engineer"]` ou `employmentType={"@id":"FULL_TIME"}` fait
+    planter le pipeline en aval (sérialisation, .join, etc.).
+    """
     return {
-        "title": jp.get("title"),
+        "title": _coerce_str(jp.get("title")),
         "company": _org_name(jp.get("hiringOrganization")),
         "location": _location(jp.get("jobLocation")),
-        "employment_type": jp.get("employmentType"),
-        "posted_date": jp.get("datePosted"),
-        "valid_through": jp.get("validThrough"),
+        "employment_type": _coerce_str(jp.get("employmentType")),
+        "posted_date": _coerce_str(jp.get("datePosted")),
+        "valid_through": _coerce_str(jp.get("validThrough")),
         "salary": _salary(jp.get("baseSalary")),
         "remote": jp.get("jobLocationType") == "TELECOMMUTE",
         "description": _strip_html(jp.get("description")),

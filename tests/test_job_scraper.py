@@ -2,7 +2,11 @@
 import pytest
 
 from backend.agents.job_scraper import (
+    _coerce_str,
+    _from_jsonld,
     _humanize_slug,
+    _location,
+    _org_name,
     infer_company_from_url,
     scrape_job,
 )
@@ -202,3 +206,159 @@ def test_humanize_slug_handles_acronyms_and_kebab():
     assert _humanize_slug("bnp-paribas") == "Bnp Paribas"
     assert _humanize_slug("tik-tok") == "Tik Tok"
     assert _humanize_slug("") == ""
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _coerce_str + Schema.org coercion (régression : 500
+# "sequence item 0: expected str instance, dict found")
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("Paris", "Paris"),
+        ("  Paris  ", "Paris"),
+        ("", None),
+        (None, None),
+        ([], None),
+        (["Engineer"], "Engineer"),
+        (["Engineer", "Other"], "Engineer"),  # premier élément
+        ({"@type": "Country", "name": "France"}, "France"),
+        ({"name": "Acme"}, "Acme"),
+        ({"value": "Senior"}, "Senior"),
+        ({"@id": "FULL_TIME"}, "FULL_TIME"),
+        ({}, None),
+        ({"name": ""}, None),  # name vide → None plutôt que ""
+    ],
+)
+def test_coerce_str_extracts_string_from_various_shapes(raw, expected):
+    assert _coerce_str(raw) == expected
+
+
+def test_org_name_handles_dict_organization():
+    """Cas Schema.org standard."""
+    assert _org_name({"@type": "Organization", "name": "ACME"}) == "ACME"
+
+
+def test_org_name_handles_string():
+    assert _org_name("ACME") == "ACME"
+
+
+def test_org_name_handles_list():
+    """Certains sites mettent l'org en liste."""
+    assert _org_name([{"name": "ACME"}, {"name": "Other"}]) == "ACME"
+
+
+def test_location_handles_dict_country_RÉGRESSION():
+    """Régression du bug 500 'sequence item 0: expected str instance, dict found'.
+
+    Plusieurs ATS (Workday, Indeed enrichi, certaines pages SAP
+    SuccessFactors) sérialisent addressCountry comme un objet
+    `{"@type": "Country", "name": "France"}` au lieu d'une string.
+    Sans coerce, `", ".join(...)` plante en TypeError → 500 côté backend.
+    """
+    job_location = {
+        "@type": "Place",
+        "address": {
+            "@type": "PostalAddress",
+            "addressLocality": "Paris",
+            "addressRegion": {"@type": "Region", "name": "Île-de-France"},
+            "addressCountry": {"@type": "Country", "name": "France"},
+        },
+    }
+    assert _location(job_location) == "Paris, Île-de-France, France"
+
+
+def test_location_handles_address_as_list():
+    """Schema.org : l'`address` peut être enveloppée dans une liste."""
+    job_location = {
+        "@type": "Place",
+        "address": [
+            {
+                "@type": "PostalAddress",
+                "addressLocality": "Paris",
+                "addressCountry": "France",
+            }
+        ],
+    }
+    assert _location(job_location) == "Paris, France"
+
+
+def test_location_handles_address_as_plain_string():
+    job_location = {"@type": "Place", "address": "Paris, France"}
+    assert _location(job_location) == "Paris, France"
+
+
+def test_location_falls_back_to_place_name():
+    """Pas d'address → on tente le `name` du Place."""
+    assert _location({"@type": "Place", "name": "Remote — Worldwide"}) == "Remote — Worldwide"
+
+
+def test_location_handles_pure_string():
+    assert _location("Paris, France") == "Paris, France"
+
+
+def test_location_handles_list_of_places():
+    job_location = [
+        {"@type": "Place", "address": {"addressLocality": "Paris"}},
+        {"@type": "Place", "address": {"addressLocality": "London"}},
+    ]
+    assert _location(job_location) == "Paris"
+
+
+def test_from_jsonld_does_not_crash_on_dict_employment_type_RÉGRESSION():
+    """Le JSON-LD peut mettre employmentType en object/list — sans coerce
+    on stockait un dict dans le résultat puis le sérialiseur JSON ou un
+    .join en aval plantait."""
+    jp = {
+        "@type": "JobPosting",
+        "title": "Engineer",
+        "hiringOrganization": {"@type": "Organization", "name": "ACME"},
+        "jobLocation": {
+            "@type": "Place",
+            "address": {
+                "addressLocality": "Paris",
+                "addressCountry": {"@type": "Country", "name": "France"},
+            },
+        },
+        "employmentType": ["FULL_TIME"],
+        "datePosted": "2026-04-01",
+        "validThrough": "2026-06-01",
+        "description": "We need a great engineer.",
+    }
+    out = _from_jsonld(jp)
+    assert out["title"] == "Engineer"
+    assert out["company"] == "ACME"
+    assert out["location"] == "Paris, France"
+    assert out["employment_type"] == "FULL_TIME"
+
+
+def test_scrape_jsonld_dict_country_does_not_500_RÉGRESSION():
+    """Test end-to-end : scrape_job ne doit pas raise quand
+    addressCountry est un dict (cas reporté en prod sur certains sites)."""
+    html = """
+    <!doctype html>
+    <html><head><title>Engineer</title>
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "JobPosting",
+      "title": "Senior Engineer",
+      "hiringOrganization": {"@type": "Organization", "name": "BigCorp"},
+      "jobLocation": {
+        "@type": "Place",
+        "address": {
+          "@type": "PostalAddress",
+          "addressLocality": "Paris",
+          "addressCountry": {"@type": "Country", "name": "France"}
+        }
+      }
+    }
+    </script>
+    </head><body>body</body></html>
+    """
+    r = scrape_job(html, url="https://example.com/job/1")
+    assert r["title"] == "Senior Engineer"
+    assert r["company"] == "BigCorp"
+    assert r["location"] == "Paris, France"
